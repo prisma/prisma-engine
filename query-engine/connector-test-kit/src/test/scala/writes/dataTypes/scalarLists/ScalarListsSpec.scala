@@ -1,7 +1,6 @@
 package writes.dataTypes.scalarLists
 
 import org.scalatest.{FlatSpec, Matchers}
-import play.api.libs.json.JsValue
 import util.ConnectorCapability.ScalarListsCapability
 import util._
 
@@ -101,7 +100,7 @@ class ScalarListsSpec extends FlatSpec with Matchers with ApiSpecBase {
       s"""mutation {
          |  createScalarModel(data: {
          |    id: 1
-         |    strings:    ["test${TroubleCharacters.value}"]
+         |    strings:   ["test${TroubleCharacters.value}"]
          |    ints:      [1337, 12]
          |    floats:    [1.234, 1.45]
          |    decimals:  ["1.234", "1.45"]
