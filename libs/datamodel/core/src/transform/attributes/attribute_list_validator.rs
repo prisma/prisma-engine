@@ -49,6 +49,7 @@ impl<T: 'static> AttributeListValidator<T> {
         errors.to_result()?;
 
         for attribute in ast.attributes() {
+            #[allow(clippy::all)]
             match self.known_attributes.get(&attribute.name.name) {
                 Some(validator) => {
                     let mut arguments = Arguments::new(&attribute.arguments, attribute.span);
@@ -91,12 +92,12 @@ impl<T: 'static> AttributeListValidator<T> {
                     }
                 }
                 None => {
-                    if !attribute.name.name.is_empty() && !attribute.name.name.contains('.') {
-                        errors.push_error(DatamodelError::new_attribute_not_known_error(
-                            &attribute.name.name,
-                            attribute.name.span,
-                        ))
-                    }
+                    // if !attribute.name.name.is_empty() && !attribute.name.name.contains('.') {
+                    //     errors.push_error(DatamodelError::new_attribute_not_known_error(
+                    //         &attribute.name.name,
+                    //         attribute.name.span,
+                    //     ))
+                    // }
                 }
             };
         }

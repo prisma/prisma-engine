@@ -6,6 +6,7 @@
 mod argument;
 mod attribute;
 mod comment;
+mod encryptor_config;
 mod r#enum;
 mod expression;
 mod field;
@@ -25,6 +26,7 @@ pub mod reformat;
 pub use argument::Argument;
 pub use attribute::Attribute;
 pub use comment::Comment;
+pub use encryptor_config::EncryptorConfig;
 pub use expression::Expression;
 pub use field::{Field, FieldArity};
 pub use generator_config::GeneratorConfig;
@@ -162,6 +164,16 @@ impl SchemaAst {
             .iter()
             .filter_map(|top| match top {
                 Top::Generator(x) => Some(x),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn encryptors(&self) -> Vec<&EncryptorConfig> {
+        self.tops
+            .iter()
+            .filter_map(|top| match top {
+                Top::Encryptor(x) => Some(x),
                 _ => None,
             })
             .collect()
