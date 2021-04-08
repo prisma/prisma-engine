@@ -1,23 +1,51 @@
 name: Query Engine
 on:
   push:
+    branches:
+      - master
+  pull_request:
 
 jobs:
-
   test:
     name: "Test Query Engine - ${{ matrix.connector }}"
-    
+
     strategy:
       fail-fast: false
       matrix:
-        connector: [postgresql9, postgresql10, postgresql11, postgresql12, postgresql13, pgbouncer, mysql, mysql56, mysql8, mariadb, mssql2017, mssql2019, sqlite]
-        
+        connector:
+          - postgres9
+          - postgres10
+          - postgres11
+          - postgres12
+          - postgres13
+          - pgbouncer
+          - mysql
+          - mysql_5_6
+          - mysql8
+          - mariadb
+          - mssql2017
+          - mssql2019
+          - sqlite
+
+    env:
+      SQLITE_MAX_VARIABLE_NUMBER: 250000
+      SQLITE_MAX_EXPR_DEPTH: 10000
+
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
 
-      - name: "Start databases"
-        run: docker-compose up -d 
+      - name: "Start database"
+        run: make dev-${{ matrix.connector }}
+
+      - uses: olafurpg/setup-scala@v10
+        with:
+          java-version: adopt@1.8
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          default: true
 
       - uses: actions/cache@v2
         with:
@@ -25,11 +53,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: query-engine-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          
-      - name: Build Engines on image
-        run: docker-compose run -e SQLITE_MAX_VARIABLE_NUMBER=250000 -e SQLITE_MAX_EXPR_DEPTH=10000 qe-test-base cargo build --all-features --release --bin query-engine --bin migration-engine          
-      
-      - name: Run tests on image
-        run: docker-compose run -e TEST_CONNECTOR=${{ matrix.connector }} -e TEST_MODE=simple -w /root/build/query-engine/connector-test-kit qe-test-base sbt test
+          key: query-engine-${{ runner.os }}-cargo
 
+      - name: Run tests
+        run: export SERVER_ROOT=$(pwd) && cd query-engine/connector-test-kit && sbt test
