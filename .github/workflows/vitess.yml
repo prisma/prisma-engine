@@ -1,0 +1,115 @@
+on:
+  push:
+    branches:
+      - planetscale
+
+jobs:
+  query-engine:
+    name: Query Engine Tests
+    runs-on: ubuntu-latest
+
+    env:
+      TEST_CONNECTOR: "vitess"
+      LOG_LEVEL: "info"
+      LOG_QUERIES: "y"
+      RUST_LOG_FORMAT: "devel"
+      RUST_BACKTRACE: 1
+      CLICOLOR_FORCE: 1
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: "Start vitess"
+        run: docker-compose --file vitess/docker-compose.yml up -d
+
+      - uses: olafurpg/setup-scala@v10
+        with:
+          java-version: adopt@1.8
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          default: true
+
+      - uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: query-engine-cargo-vitess
+
+      - name: Compile QE and ME
+        run: |
+          cargo build -p migration-engine-cli --manifest-path migration-engine/cli/Cargo.toml --features quaint/vendored-openssl --release
+          cargo build -p query-engine --manifest-path query-engine/query-engine/Cargo.toml --features quaint/vendored-openssl --release
+
+      - name: Wait for databases to get healthy
+        uses: juliangruber/sleep-action@v1
+        with:
+          time: 30s
+
+      - name: Run tests
+        run: export SERVER_ROOT=$(pwd) && cd query-engine/connector-test-kit && sbt test
+
+  migration-engine:
+    name: Migration Engine Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: "Start vitess"
+        run: docker-compose --file vitess/docker-compose.yml up -d
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          default: true
+
+      - uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: migration-engine-cargo-vitess
+
+      - name: Wait for databases to get healthy
+        uses: juliangruber/sleep-action@v1
+        with:
+          time: 60s
+
+      - name: Run tests
+        working-directory: migration-engine/migration-engine-tests
+        run: cargo test mysql_5_7 -- --test-threads=1
+
+  introspection-engine:
+    name: Introspection Engine Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: "Start vitess"
+        run: docker-compose --file vitess/docker-compose.yml up -d
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          default: true
+
+      - uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: introspection-engine-cargo-vitess
+
+      - name: Wait for databases to get healthy
+        uses: juliangruber/sleep-action@v1
+        with:
+          time: 60s
+
+      - name: Run tests
+        working-directory: introspection-engine/introspection-engine-tests
+        run: cargo test mysql_5_7 -- --test-threads=1
