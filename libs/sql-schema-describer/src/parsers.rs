@@ -2,7 +2,7 @@
 
 use bigdecimal::BigDecimal;
 use once_cell::sync::Lazy;
-use prisma_value::PrismaValue;
+use prisma_value::{FloatValue, PrismaValue};
 use regex::Regex;
 use std::str::FromStr;
 use tracing::debug;
@@ -50,10 +50,23 @@ pub(crate) trait Parser {
         let captures = Self::re_float().captures(value)?;
         let num_str = captures.get(1).expect("get capture").as_str();
 
-        match BigDecimal::from_str(num_str) {
-            Ok(num) => Some(PrismaValue::Float(num)),
+        match num_str.parse() {
+            Ok(num) => Some(PrismaValue::Float(FloatValue(num))),
             Err(_) => {
-                debug!("Couldn't parse float '{}'", value);
+                debug!("Couldn't parse decimal '{}'", value);
+                None
+            }
+        }
+    }
+
+    fn parse_decimal(value: &str) -> Option<PrismaValue> {
+        let captures = Self::re_float().captures(value)?;
+        let num_str = captures.get(1).expect("get capture").as_str();
+
+        match BigDecimal::from_str(num_str) {
+            Ok(num) => Some(PrismaValue::Decimal(num)),
+            Err(_) => {
+                debug!("Couldn't parse decimal '{}'", value);
                 None
             }
         }
