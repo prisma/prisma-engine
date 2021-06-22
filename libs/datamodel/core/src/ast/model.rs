@@ -21,18 +21,19 @@ pub struct Model {
 }
 
 impl Model {
+    pub fn find_field(&self, name: &str) -> Option<&Field> {
+        self.fields.iter().find(|ast_field| ast_field.name.name == name)
+    }
+
+    pub fn find_field_bang(&self, name: &str) -> &Field {
+        self.find_field(name).unwrap()
+    }
+
     pub(crate) fn iter_fields(&self) -> impl Iterator<Item = (FieldId, &Field)> {
         self.fields
             .iter()
             .enumerate()
             .map(|(idx, field)| (FieldId(idx as u32), field))
-    }
-
-    pub fn find_field(&self, name: &str) -> &Field {
-        self.fields
-            .iter()
-            .find(|ast_field| ast_field.name.name == name)
-            .unwrap()
     }
 }
 

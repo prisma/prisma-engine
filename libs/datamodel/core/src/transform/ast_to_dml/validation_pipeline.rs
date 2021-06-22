@@ -1,23 +1,23 @@
 use super::db::ParserDatabase;
 use super::*;
+use crate::common::datamodel_context::DatamodelContext;
 use crate::transform::ast_to_dml::standardise_parsing::StandardiserForParsing;
-use crate::{ast, configuration, diagnostics::Diagnostics, ValidatedDatamodel};
+use crate::{ast, diagnostics::Diagnostics, ValidatedDatamodel};
 
 /// Is responsible for loading and validating the Datamodel defined in an AST.
 /// Wrapper for all lift and validation steps
 pub struct ValidationPipeline<'a> {
-    source: Option<&'a configuration::Datasource>,
+    context: &'a DatamodelContext,
     validator: Validator<'a>,
     standardiser_for_parsing: StandardiserForParsing,
     standardiser_for_formatting: StandardiserForFormatting,
 }
 
 impl<'a, 'b> ValidationPipeline<'a> {
-    pub fn new(sources: &'a [configuration::Datasource]) -> ValidationPipeline<'a> {
-        let source = sources.first();
+    pub fn new(context: &'a DatamodelContext) -> ValidationPipeline<'a> {
         ValidationPipeline {
-            source,
-            validator: Validator::new(source),
+            context,
+            validator: Validator::new(&context),
             standardiser_for_formatting: StandardiserForFormatting::new(),
             standardiser_for_parsing: StandardiserForParsing::new(),
         }
@@ -45,52 +45,46 @@ impl<'a, 'b> ValidationPipeline<'a> {
         let db = ParserDatabase::new(ast_schema, &mut diagnostics);
 
         // Early return so that the validator does not have to deal with invalid schemas
-        if diagnostics.has_errors() {
-            return Err(diagnostics);
-        }
+        diagnostics.make_result()?;
 
         // Phase 3: Lift AST to DML.
-        let lifter = LiftAstToDml::new(self.source, &db);
+        let lifter = LiftAstToDml::new(&self.context, &db);
 
         let mut schema = match lifter.lift() {
-            Err(mut err) => {
+            Err(err) => {
                 // Cannot continue on lifter error.
-                diagnostics.append(&mut err);
+                diagnostics.extend(err);
                 return Err(diagnostics);
             }
             Ok(schema) => schema,
         };
 
         // Phase 4: Validation
-        if let Err(mut err) = self.validator.validate(&db, &mut schema) {
-            diagnostics.append(&mut err);
+        if let Err(err) = self.validator.validate(&db, &mut schema) {
+            diagnostics.extend(err);
         }
 
         // Early return so that the standardiser does not have to deal with invalid schemas
-        if diagnostics.has_errors() {
-            return Err(diagnostics);
-        }
+        diagnostics.make_result()?;
 
         // TODO: Move consistency stuff into different module.
         // Phase 5: Consistency fixes. These don't fail and always run, during parsing AND formatting
-        if let Err(mut err) = self.standardiser_for_parsing.standardise(&mut schema) {
-            diagnostics.append(&mut err);
+        if let Err(err) = self.standardiser_for_parsing.standardise(&mut schema) {
+            diagnostics.extend(err);
         }
 
         // Transform phase: These only run during formatting.
         if relation_transformation_enabled {
-            if let Err(mut err) = self.standardiser_for_formatting.standardise(ast_schema, &mut schema) {
-                diagnostics.append(&mut err);
+            if let Err(err) = self.standardiser_for_formatting.standardise(ast_schema, &mut schema) {
+                diagnostics.extend(err);
             }
         }
         // Early return so that the post validation does not have to deal with invalid schemas
-        if diagnostics.has_errors() {
-            return Err(diagnostics);
-        }
+        diagnostics.make_result()?;
 
         // Phase 6: Post Standardisation Validation
-        if let Err(mut err) = self.validator.post_standardisation_validate(ast_schema, &mut schema) {
-            diagnostics.append(&mut err);
+        if let Err(err) = self.validator.post_standardisation_validate(ast_schema, &mut schema) {
+            diagnostics.extend(err);
         }
 
         if diagnostics.has_errors() {

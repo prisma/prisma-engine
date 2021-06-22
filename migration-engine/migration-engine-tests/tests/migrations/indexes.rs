@@ -18,7 +18,7 @@ fn index_on_compound_relation_fields_must_work(api: TestApi) {
             authorName String
             author User @relation(fields: [authorEmail, authorName], references: [email, name])
 
-            @@index([authorEmail, authorName], name: "testIndex")
+            @@index([authorEmail, authorName], map: "testIndex")
         }
     "#;
 
@@ -40,7 +40,7 @@ fn index_settings_must_be_migrated(api: TestApi) {
             name String
             followersCount Int
 
-            @@index([name, followersCount], name: "nameAndFollowers")
+            @@index([name, followersCount], map: "nameAndFollowers")
         }
     "#;
 
@@ -60,7 +60,7 @@ fn index_settings_must_be_migrated(api: TestApi) {
             name String
             followersCount Int
 
-            @@unique([name, followersCount], name: "nameAndFollowers")
+            @@unique([name, followersCount], map: "nameAndFollowers")
         }
     "#;
 
@@ -206,8 +206,8 @@ fn index_renaming_must_work(api: TestApi) {
             field String
             secondField Int
 
-            @@unique([field, secondField], name: "customName")
-            @@index([secondField, field], name: "customNameNonUnique")
+            @@unique([field, secondField], map: "customName")
+            @@index([secondField, field], map: "customNameNonUnique")
         }
     "#;
 
@@ -229,8 +229,8 @@ fn index_renaming_must_work(api: TestApi) {
             field String
             secondField Int
 
-            @@unique([field, secondField], name: "customNameA")
-            @@index([secondField, field], name: "customNameNonUniqueA")
+            @@unique([field, secondField], map: "customNameA")
+            @@index([secondField, field], map: "customNameNonUniqueA")
         }
     "#;
 
@@ -256,7 +256,7 @@ fn index_renaming_must_work_when_renaming_to_default(api: TestApi) {
             field String
             secondField Int
 
-            @@unique([field, secondField], name: "customName")
+            @@unique([field, secondField], map: "customName")
         }
     "#;
 
@@ -278,7 +278,7 @@ fn index_renaming_must_work_when_renaming_to_default(api: TestApi) {
     api.schema_push(dm2).send_sync();
     api.assert_schema().assert_table("A", |t| {
         t.assert_index_on_columns(&["field", "secondField"], |idx| {
-            idx.assert_is_unique().assert_name("A.field_secondField_unique")
+            idx.assert_is_unique().assert_name("A_field_secondField_key")
         })
     });
 }
@@ -309,7 +309,7 @@ fn index_renaming_must_work_when_renaming_to_custom(api: TestApi) {
             field String
             secondField Int
 
-            @@unique([field, secondField], name: "somethingCustom")
+            @@unique([field, secondField], map: "somethingCustom")
         }
     "#;
 
@@ -332,7 +332,7 @@ fn index_updates_with_rename_must_work(api: TestApi) {
             field String
             secondField Int
 
-            @@unique([field, secondField], name: "customName")
+            @@unique([field, secondField], map: "customName")
         }
     "#;
 
@@ -347,7 +347,7 @@ fn index_updates_with_rename_must_work(api: TestApi) {
             field String
             secondField Int
 
-            @@unique([field, id], name: "customNameA")
+            @@unique([field, id], map: "customNameA")
         }
     "#;
 
@@ -367,7 +367,7 @@ fn dropping_a_model_with_a_multi_field_unique_index_must_work(api: TestApi) {
             field String
             secondField Int
 
-            @@unique([field, secondField], name: "customName")
+            @@unique([field, secondField], map: "customName")
         }
     "#;
 
@@ -381,9 +381,10 @@ fn dropping_a_model_with_a_multi_field_unique_index_must_work(api: TestApi) {
     api.schema_push("").send_sync().assert_green_bang();
 }
 
-#[test_connector(tags(Postgres, Mysql))]
+#[test_connector]
 fn indexes_with_an_automatically_truncated_name_are_idempotent(api: TestApi) {
-    let dm = r#"
+    let dm = api.datamodel_with_provider(
+        r#"
         model TestModelWithALongName {
             id Int @id
             looooooooooooongfield String
@@ -392,28 +393,32 @@ fn indexes_with_an_automatically_truncated_name_are_idempotent(api: TestApi) {
 
             @@index([looooooooooooongfield, evenLongerFieldNameWth, omgWhatEvenIsThatLongFieldName])
         }
-    "#;
+    "#,
+    );
 
-    api.schema_push(dm).send_sync().assert_green_bang();
+    api.schema_push(&dm).send_sync().assert_green_bang();
 
-    api.assert_schema().assert_table("TestModelWithALongName", |table| {
-        table.assert_index_on_columns(
-            &[
-                "looooooooooooongfield",
-                "evenLongerFieldNameWth",
-                "omgWhatEvenIsThatLongFieldName",
-            ],
-            |idx| {
-                idx.assert_name(if api.is_mysql() {
-                    // The size limit of identifiers is 64 bytes on MySQL
-                    // and 63 on Postgres.
-                    "TestModelWithALongName.looooooooooooongfield_evenLongerFieldName"
-                } else {
-                    "TestModelWithALongName.looooooooooooongfield_evenLongerFieldNam"
-                })
-            },
-        )
-    });
+    api.assert_schema()
+        .assert_table("TestModelWithALongName", |table| {
+            table.assert_index_on_columns(
+                &[
+                    "looooooooooooongfield",
+                    "evenLongerFieldNameWth",
+                    "omgWhatEvenIsThatLongFieldName",
+                ],
+                |idx| {
+                    idx.assert_name(if api.is_mysql() {
+                        // The size limit of identifiers is 64 bytes on MySQL
+                        // and 63 on Postgres.
+                        "TestModelWithALongName_looooooooooooongfield_evenLongerField_idx"
+                    } else if api.is_postgres() {
+                        "TestModelWithALongName_looooooooooooongfield_evenLongerFiel_idx"
+                    } else {
+                        "TestModelWithALongName_looooooooooooongfield_evenLongerFieldNameWth_omgWhatEvenIsThatLongFieldName_idx"
+                    })
+                },
+            )
+        });
 
     api.schema_push(dm).send_sync().assert_green_bang().assert_no_steps();
 }
@@ -433,7 +438,7 @@ fn new_index_with_same_name_as_index_from_dropped_table_works(api: TestApi) {
             id Int @id
             ownerid String
 
-            @@index([ownerid], name: "ownerid")
+            @@index([ownerid], map: "ownerid")
         }
 
         model Owner {
@@ -454,7 +459,7 @@ fn new_index_with_same_name_as_index_from_dropped_table_works(api: TestApi) {
             ownerid String
             owner   Cat @relation(fields: [ownerid], references: id)
 
-            @@index([ownerid], name: "ownerid")
+            @@index([ownerid], map: "ownerid")
         }
 
         model Cat {

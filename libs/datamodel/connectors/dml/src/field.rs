@@ -1,5 +1,6 @@
 use super::*;
 use crate::default_value::{DefaultValue, ValueGenerator};
+use crate::model::{IndexDefinition, PrimaryKeyDefinition};
 use crate::native_type_instance::NativeTypeInstance;
 use crate::scalars::ScalarType;
 use crate::traits::{Ignorable, WithDatabaseName, WithName};
@@ -178,14 +179,14 @@ impl Field {
 
     pub fn is_unique(&self) -> bool {
         match &self {
-            Field::ScalarField(sf) => sf.is_unique,
+            Field::ScalarField(sf) => sf.is_unique.is_some(),
             Field::RelationField(_) => false,
         }
     }
 
     pub fn is_id(&self) -> bool {
         match &self {
-            Field::ScalarField(sf) => sf.is_id,
+            Field::ScalarField(sf) => sf.primary_key.is_some(),
             Field::RelationField(_) => false,
         }
     }
@@ -320,11 +321,13 @@ pub struct ScalarField {
     /// The default value.
     pub default_value: Option<DefaultValue>,
 
+    //todo idealy we get rid of this on the field level and only have it on the model level or only have it as a bool
     /// Indicates if the field is unique.
-    pub is_unique: bool,
+    pub is_unique: Option<IndexDefinition>,
 
-    /// true if this field marked with @id.
-    pub is_id: bool,
+    //todo idealy we get rid of this on the field level and only have it on the model level  or only have it as a bool
+    /// The Primary Key definition if the PK covers only this field .
+    pub primary_key: Option<PrimaryKeyDefinition>,
 
     /// Comments associated with this field.
     pub documentation: Option<String>,
@@ -352,8 +355,8 @@ impl ScalarField {
             field_type,
             database_name: None,
             default_value: None,
-            is_unique: false,
-            is_id: false,
+            is_unique: None,
+            primary_key: None,
             documentation: None,
             is_generated: false,
             is_updated_at: false,
@@ -392,6 +395,10 @@ impl ScalarField {
 
     pub fn is_auto_increment(&self) -> bool {
         matches!(&self.default_value, Some(DefaultValue::Expression(expr)) if expr == &ValueGenerator::new_autoincrement())
+    }
+
+    pub fn is_id(&self) -> bool {
+        self.primary_key.is_some()
     }
 }
 

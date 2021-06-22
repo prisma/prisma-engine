@@ -1,12 +1,11 @@
 use crate::Dedup;
 use crate::SqlError;
+use datamodel::common::datamodel_context::DatamodelContext;
+use datamodel::common::ConstraintNames;
 use datamodel::{
     common::RelationNames, Datamodel, DefaultValue as DMLDef, FieldArity, FieldType, IndexDefinition, Model,
-    OnDeleteStrategy, RelationField, RelationInfo, ScalarField, ScalarType, ValueGenerator as VG,
+    OnDeleteStrategy, PrimaryKeyDefinition, RelationField, RelationInfo, ScalarField, ScalarType, ValueGenerator as VG,
 };
-use datamodel_connector::Connector;
-use quaint::connector::SqlFamily;
-use sql_datamodel_connector::SqlDatamodelConnectors;
 use sql_schema_describer::DefaultKind;
 use sql_schema_describer::{Column, ColumnArity, ColumnTypeFamily, ForeignKey, Index, IndexType, SqlSchema, Table};
 use tracing::debug;
@@ -108,6 +107,8 @@ pub fn calculate_many_to_many_field(
         to: opposite_foreign_key.referenced_table.clone(),
         references: opposite_foreign_key.referenced_columns.clone(),
         on_delete: OnDeleteStrategy::None,
+        fk_name: None,
+        fk_name_matches_default: false,
     };
 
     let basename = opposite_foreign_key.referenced_table.clone();
@@ -120,36 +121,50 @@ pub fn calculate_many_to_many_field(
     RelationField::new(&name, FieldArity::List, relation_info)
 }
 
-pub(crate) fn calculate_index(index: &Index) -> IndexDefinition {
+pub(crate) fn calculate_index(table_name: String, index: &Index, ctx: &DatamodelContext) -> IndexDefinition {
     debug!("Handling index  {:?}", index);
+
     let tpe = match index.tpe {
         IndexType::Unique => datamodel::dml::IndexType::Unique,
         IndexType::Normal => datamodel::dml::IndexType::Normal,
     };
+    let default_name = ConstraintNames::index_name(&table_name, index.columns.clone(), tpe, ctx);
+
+    //We do not populate name in client by default. It increases datamodel noise,
+    //and we would need to sanitize it. Users can give their own names if they want
+    //and re-introspection will keep them. This is a change in introspection behaviour,
+    //but due to re-introspection previous datamodels and clients should keep working as before.
 
     IndexDefinition {
-        name: Some(index.name.clone()),
+        name_in_db: index.name.clone(),
+        name_in_db_matches_default: index.name == default_name,
+        name_in_client: None,
         fields: index.columns.clone(),
         tpe,
     }
 }
 
-pub(crate) fn calculate_scalar_field(table: &Table, column: &Column, family: &SqlFamily) -> ScalarField {
+pub(crate) fn calculate_scalar_field(table: &Table, column: &Column, ctx: &DatamodelContext) -> ScalarField {
     debug!("Handling column {:?}", column);
 
-    let field_type = calculate_scalar_field_type_with_native_types(column, family);
+    let field_type = calculate_scalar_field_type_with_native_types(column, ctx);
 
-    let is_id = is_id(&column, &table);
+    let primary_key = primary_key(&column, &table, ctx);
     let arity = match column.tpe.arity {
-        _ if is_id && column.auto_increment => FieldArity::Required,
+        _ if primary_key.is_some() && column.auto_increment => FieldArity::Required,
         ColumnArity::Required => FieldArity::Required,
         ColumnArity::Nullable => FieldArity::Optional,
         ColumnArity::List => FieldArity::List,
     };
 
     let default_value = calculate_default(table, &column, &arity);
+    let table_name = table.name.clone();
 
-    let is_unique = table.is_column_unique(&column.name) && !is_id;
+    let is_unique = table
+        .indices
+        .iter()
+        .find(|index| index.tpe == IndexType::Unique && index.columns == [column.name.to_string()])
+        .map(|index| calculate_index(table_name, index, ctx));
 
     ScalarField {
         name: column.name.clone(),
@@ -158,7 +173,7 @@ pub(crate) fn calculate_scalar_field(table: &Table, column: &Column, family: &Sq
         database_name: None,
         default_value,
         is_unique,
-        is_id,
+        primary_key,
         documentation: None,
         is_generated: false,
         is_updated_at: false,
@@ -171,8 +186,12 @@ pub(crate) fn calculate_relation_field(
     schema: &SqlSchema,
     table: &Table,
     foreign_key: &ForeignKey,
+    ctx: &DatamodelContext,
 ) -> Result<RelationField, SqlError> {
     debug!("Handling foreign key  {:?}", foreign_key);
+
+    let fk_default_name =
+        ConstraintNames::foreign_key_constraint_name(&table.name.clone(), foreign_key.columns.clone(), ctx);
 
     let relation_info = RelationInfo {
         name: calculate_relation_name(schema, foreign_key, table)?,
@@ -180,6 +199,8 @@ pub(crate) fn calculate_relation_field(
         to: foreign_key.referenced_table.clone(),
         references: foreign_key.referenced_columns.clone(),
         on_delete: OnDeleteStrategy::None,
+        fk_name: foreign_key.constraint_name.clone(),
+        fk_name_matches_default: Some(fk_default_name) == foreign_key.constraint_name,
     };
 
     let columns: Vec<&Column> = foreign_key
@@ -214,6 +235,8 @@ pub(crate) fn calculate_backrelation_field(
                 fields: vec![],
                 references: vec![],
                 on_delete: OnDeleteStrategy::None,
+                fk_name: None,
+                fk_name_matches_default: false,
             };
 
             // unique or id
@@ -260,12 +283,21 @@ pub(crate) fn calculate_default(table: &Table, column: &Column, arity: &FieldAri
     }
 }
 
-pub(crate) fn is_id(column: &Column, table: &Table) -> bool {
-    table
-        .primary_key
-        .as_ref()
-        .map(|pk| pk.is_single_primary_key(&column.name))
-        .unwrap_or(false)
+pub(crate) fn primary_key(column: &Column, table: &Table, ctx: &DatamodelContext) -> Option<PrimaryKeyDefinition> {
+    match &table.primary_key {
+        Some(pk) if pk.columns.len() == 1 && pk.columns.first().unwrap() == &column.name => {
+            let name_in_db_matches_default =
+                ConstraintNames::primary_key_name_matches(pk.constraint_name.clone(), &table.name, ctx);
+
+            Some(PrimaryKeyDefinition {
+                name_in_client: None,
+                name_in_db_matches_default,
+                name_in_db: pk.constraint_name.clone(),
+                fields: pk.columns.clone(),
+            })
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn is_sequence(column: &Column, table: &Table) -> bool {
@@ -333,23 +365,15 @@ pub(crate) fn calculate_scalar_field_type_for_native_type(column: &Column) -> Fi
     }
 }
 
-pub(crate) fn calculate_scalar_field_type_with_native_types(column: &Column, family: &SqlFamily) -> FieldType {
+pub(crate) fn calculate_scalar_field_type_with_native_types(column: &Column, context: &DatamodelContext) -> FieldType {
     debug!("Calculating native field type for '{}'", column.name);
     let scalar_type = calculate_scalar_field_type_for_native_type(column);
-
-    //fixme move this out of function
-    let connector: Box<dyn Connector> = match family {
-        SqlFamily::Mysql => Box::new(SqlDatamodelConnectors::mysql()),
-        SqlFamily::Postgres => Box::new(SqlDatamodelConnectors::postgres()),
-        SqlFamily::Sqlite => Box::new(SqlDatamodelConnectors::sqlite()),
-        SqlFamily::Mssql => Box::new(SqlDatamodelConnectors::mssql()),
-    };
 
     match scalar_type {
         FieldType::Base(scal_type, _) => match &column.tpe.native_type {
             None => scalar_type,
             Some(native_type) => {
-                let native_type_instance = connector.introspect_native_type(native_type.clone()).unwrap();
+                let native_type_instance = context.connector.introspect_native_type(native_type.clone()).unwrap();
                 FieldType::NativeType(scal_type, native_type_instance)
             }
         },

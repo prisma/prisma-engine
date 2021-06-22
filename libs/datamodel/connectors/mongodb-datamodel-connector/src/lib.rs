@@ -158,4 +158,8 @@ impl Connector for MongoDbDatamodelConnector {
 
         Ok(())
     }
+
+    fn constraint_name_length(&self) -> usize {
+        127
+    }
 }

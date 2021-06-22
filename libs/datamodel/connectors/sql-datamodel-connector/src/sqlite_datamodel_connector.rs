@@ -32,6 +32,11 @@ impl Connector for SqliteDatamodelConnector {
     fn name(&self) -> &str {
         "sqlite"
     }
+
+    fn is_empty_default(&self) -> bool {
+        false
+    }
+
     fn capabilities(&self) -> &[ConnectorCapability] {
         &self.capabilities
     }
@@ -96,6 +101,10 @@ impl Connector for SqliteDatamodelConnector {
         }
 
         Ok(())
+    }
+
+    fn constraint_name_length(&self) -> usize {
+        10000
     }
 }
 

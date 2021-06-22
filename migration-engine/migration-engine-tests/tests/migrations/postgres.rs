@@ -161,27 +161,31 @@ fn uuids_do_not_generate_drift_issue_5282(api: TestApi) {
     api.raw_cmd(
         r#"
         CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-        CREATE TABLE a (id uuid DEFAULT uuid_generate_v4() primary key);
-        CREATE TABLE b (id uuid DEFAULT uuid_generate_v4() primary key, a_id uuid, CONSTRAINT aaa FOREIGN KEY (a_id) REFERENCES a(id));
-        "#
+        CREATE TABLE a (
+         id uuid DEFAULT uuid_generate_v4(),
+         Constraint a_pkey Primary Key (id)
+        );
+        CREATE TABLE b (
+         id uuid DEFAULT uuid_generate_v4(),
+         a_id uuid, 
+         Constraint b_pkey Primary Key (id),
+         CONSTRAINT B_a_id_fkey FOREIGN KEY (a_id) REFERENCES a(id));
+        "#,
     );
 
-    let dm = format!(
+    let dm = api.datamodel_with_provider(
         r#"
-        {}
-
-        model a {{
+        model a {
             id String @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
             b  b[]
-        }}
+        }
 
-        model b {{
+        model b {
             id   String  @id @default(dbgenerated("uuid_generate_v4()")) @db.Uuid
             a_id String? @db.Uuid
             a    a?      @relation(fields: [a_id], references: [id])
-        }}
+        }
         "#,
-        api.datasource_block()
     );
 
     api.schema_push(&dm)

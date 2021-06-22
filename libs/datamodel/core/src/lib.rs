@@ -86,6 +86,7 @@ pub mod dml;
 pub mod json;
 pub mod transform;
 pub mod walkers;
+use crate::common::datamodel_context::DatamodelContext;
 
 pub use crate::dml::*;
 pub use configuration::*;
@@ -93,6 +94,7 @@ use diagnostics::Diagnostics;
 
 use crate::diagnostics::{Validated, ValidatedConfiguration, ValidatedDatamodel};
 use crate::{ast::SchemaAst, common::preview_features::PreviewFeature};
+use datamodel_connector::EmptyDatamodelConnector;
 use std::collections::HashSet;
 use transform::{
     ast_to_dml::{DatasourceLoader, GeneratorLoader, ValidationPipeline},
@@ -140,11 +142,25 @@ fn parse_datamodel_internal(
     let ast = ast::parse_schema(datamodel_string)?;
 
     let generators = GeneratorLoader::load_generators_from_ast(&ast, &mut diagnostics);
-    let preview_features = preview_features(&generators);
+    let preview_features: HashSet<&PreviewFeature> = preview_features(&generators);
     let datasources = load_sources(&ast, &preview_features, &mut &mut diagnostics);
-    let validator = ValidationPipeline::new(&datasources);
 
-    diagnostics.to_result()?;
+    let first_source = load_sources(&ast, &preview_features, &mut &mut diagnostics)
+        .into_iter()
+        .next();
+    let preview_features: Vec<PreviewFeature> = preview_features.into_iter().map(|f| f.to_owned()).collect();
+
+    let ctx = DatamodelContext {
+        source_name: first_source.as_ref().map(|s| s.name.to_owned()),
+        connector: first_source
+            .map(|f| f.active_connector)
+            .unwrap_or(Box::new(EmptyDatamodelConnector)),
+        preview_features,
+    };
+
+    let validator = ValidationPipeline::new(&ctx);
+
+    diagnostics.make_result()?;
 
     match validator.validate(&ast, transform) {
         Ok(mut src) => {
@@ -179,7 +195,7 @@ pub fn parse_configuration(schema: &str) -> Result<ValidatedConfiguration, diagn
     let preview_features = preview_features(&generators);
     let datasources = load_sources(&ast, &preview_features, &mut diagnostics);
 
-    diagnostics.to_result()?;
+    diagnostics.make_result()?;
 
     Ok(ValidatedConfiguration {
         subject: Configuration {

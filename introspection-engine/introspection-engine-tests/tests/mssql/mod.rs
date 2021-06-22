@@ -1,3 +1,4 @@
+use barrel::types;
 use indoc::indoc;
 use introspection_engine_tests::{test_api::*, TestResult};
 use quaint::prelude::Queryable;
@@ -8,7 +9,8 @@ async fn geometry_should_be_unsupported(api: &TestApi) -> TestResult {
     api.barrel()
         .execute(move |migration| {
             migration.create_table("A", move |t| {
-                t.inject_custom("id int identity primary key");
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("A_pkey", types::primary_constraint(&["id"]));
                 t.inject_custom("location geography");
             });
         })
@@ -34,7 +36,10 @@ async fn user_defined_type_aliases_should_map_to_the_system_type(api: &TestApi) 
     api.database().raw_cmd(&create_type).await?;
 
     let create_table = format!(
-        "CREATE TABLE [{schema_name}].[A] (id int identity primary key, name [{schema_name}].[Name])",
+        "CREATE TABLE [{schema_name}].[A] (\
+            id int identity, \
+            name [{schema_name}].[Name],\
+            CONSTRAINT [A_pkey] PRIMARY KEY ([id]))",
         schema_name = api.schema_name()
     );
 

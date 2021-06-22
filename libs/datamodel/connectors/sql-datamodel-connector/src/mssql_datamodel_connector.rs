@@ -52,6 +52,7 @@ impl MsSqlDatamodelConnector {
             ConnectorCapability::AutoIncrementAllowedOnNonId,
             ConnectorCapability::AutoIncrementMultipleAllowed,
             ConnectorCapability::AutoIncrementNonIndexedAllowed,
+            ConnectorCapability::NamedPrimaryKeys,
             ConnectorCapability::CreateMany,
             ConnectorCapability::UpdateableId,
             ConnectorCapability::MultipleIndexesWithSameName,
@@ -136,6 +137,10 @@ const SCALAR_TYPE_DEFAULTS: &[(ScalarType, MsSqlType)] = &[
 impl Connector for MsSqlDatamodelConnector {
     fn name(&self) -> &str {
         "SQL Server"
+    }
+
+    fn is_empty_default(&self) -> bool {
+        false
     }
 
     fn capabilities(&self) -> &[ConnectorCapability] {
@@ -227,12 +232,6 @@ impl Connector for MsSqlDatamodelConnector {
                     Float(Some(bits)) if bits == 0 || bits > 53 => {
                         error.new_argument_m_out_of_range_error("Bits can range from 1 to 53.")
                     }
-                    typ if heap_allocated_types().contains(&typ) && field.is_unique() => {
-                        error.new_incompatible_native_type_with_unique()
-                    }
-                    typ if heap_allocated_types().contains(&typ) && field.is_id() => {
-                        error.new_incompatible_native_type_with_id()
-                    }
                     NVarChar(Some(Number(p))) if p > 4000 => error.new_argument_m_out_of_range_error(
                         "Length can range from 1 to 4000. For larger sizes, use the `Max` variant.",
                     ),
@@ -273,16 +272,18 @@ impl Connector for MsSqlDatamodelConnector {
             }
         }
 
-        for id_field in model.id_fields.iter() {
-            let field = model.find_field(id_field).unwrap();
+        if let Some(pk) = &model.primary_key {
+            for id_field in pk.fields.iter() {
+                let field = model.find_field(id_field).unwrap();
 
-            if let FieldType::NativeType(_, native_type) = field.field_type() {
-                let r#type: MsSqlType = native_type.deserialize_native_type();
+                if let FieldType::NativeType(_, native_type) = field.field_type() {
+                    let r#type: MsSqlType = native_type.deserialize_native_type();
 
-                if heap_allocated_types().contains(&r#type) {
-                    return self
-                        .native_instance_error(native_type)
-                        .new_incompatible_native_type_with_id();
+                    if heap_allocated_types().contains(&r#type) {
+                        return self
+                            .native_instance_error(native_type)
+                            .new_incompatible_native_type_with_id();
+                    }
                 }
             }
         }
@@ -381,6 +382,10 @@ impl Connector for MsSqlDatamodelConnector {
         }
 
         Ok(())
+    }
+
+    fn constraint_name_length(&self) -> usize {
+        128
     }
 }
 

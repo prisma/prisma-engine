@@ -5,7 +5,7 @@ use crate::{
         Datamodel, DefaultValue, Enum, EnumValue, FieldArity, FieldType, IndexDefinition, Model, ScalarField,
         WithDatabaseName,
     },
-    NativeTypeInstance, RelationField,
+    NativeTypeInstance, PrimaryKeyDefinition, RelationField,
 };
 use dml::scalars::ScalarType;
 use itertools::Itertools;
@@ -59,6 +59,10 @@ impl<'a> ModelWalker<'a> {
 
     pub fn db_name(&self) -> &str {
         self.get().final_database_name()
+    }
+
+    pub fn primary_key(&self) -> Option<&PrimaryKeyDefinition> {
+        self.get().primary_key.as_ref()
     }
 
     fn get(&self) -> &'a Model {
@@ -119,21 +123,16 @@ impl<'a> ModelWalker<'a> {
         let model_idx = self.model_idx;
         let datamodel = self.datamodel;
 
-        self.scalar_fields()
-            // Single-id models
-            .filter(|field| field.is_id())
-            // Compound id models
-            .chain(
-                self.get()
-                    .id_fields
-                    .iter()
-                    .filter_map(move |field_name| walker.find_scalar_field(field_name)),
-            )
-            .map(move |field| ScalarFieldWalker {
-                datamodel,
-                model_idx,
-                field_idx: field.field_idx,
-            })
+        self.get().primary_key.iter().flat_map(move |pk| {
+            pk.fields
+                .iter()
+                .filter_map(move |field_name| walker.find_scalar_field(field_name))
+                .map(move |field| ScalarFieldWalker {
+                    datamodel,
+                    model_idx,
+                    field_idx: field.field_idx,
+                })
+        })
     }
 
     pub fn unique_indexes<'b>(&'b self) -> impl Iterator<Item = IndexWalker<'a>> + 'b {
@@ -189,7 +188,7 @@ impl<'a> ScalarFieldWalker<'a> {
     }
 
     pub fn is_id(&self) -> bool {
-        self.get().is_id
+        self.get().is_id()
     }
 
     pub fn is_required(&self) -> bool {
@@ -197,7 +196,7 @@ impl<'a> ScalarFieldWalker<'a> {
     }
 
     pub fn is_unique(&self) -> bool {
-        self.get().is_unique
+        self.get().is_unique.is_some()
     }
 
     pub fn model(&self) -> ModelWalker<'a> {
@@ -323,6 +322,10 @@ impl<'a> RelationFieldWalker<'a> {
 
     pub fn relation_name(&self) -> &'a str {
         self.get().relation_info.name.as_ref()
+    }
+
+    pub fn constraint_name(&self) -> Option<String> {
+        self.get().relation_info.fk_name.clone()
     }
 
     pub fn referenced_model(&self) -> ModelWalker<'a> {

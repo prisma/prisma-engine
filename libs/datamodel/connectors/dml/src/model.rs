@@ -16,8 +16,8 @@ pub struct Model {
     pub is_embedded: bool,
     /// Describes Composite Indexes
     pub indices: Vec<IndexDefinition>,
-    /// Describes Composite Primary Keys
-    pub id_fields: Vec<String>,
+    /// Describes Primary Keys
+    pub primary_key: Option<PrimaryKeyDefinition>,
     /// Indicates if this model is generated.
     pub is_generated: bool,
     /// Indicates if this model has to be commented out.
@@ -29,7 +29,9 @@ pub struct Model {
 /// Represents an index defined via `@@index` or `@@unique`.
 #[derive(Debug, PartialEq, Clone)]
 pub struct IndexDefinition {
-    pub name: Option<String>,
+    pub name_in_db: String,
+    pub name_in_db_matches_default: bool,
+    pub name_in_client: Option<String>,
     pub fields: Vec<String>,
     pub tpe: IndexType,
 }
@@ -38,12 +40,38 @@ impl IndexDefinition {
     pub fn is_unique(&self) -> bool {
         matches!(self.tpe, IndexType::Unique)
     }
+
+    pub fn is_single_field(&self) -> bool {
+        self.fields.len() == 1
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum IndexType {
     Unique,
     Normal,
+}
+
+/// Represents a primary key defined via `@@id` or `@id`.
+#[derive(Debug, PartialEq, Clone)]
+pub struct PrimaryKeyDefinition {
+    pub name_in_db: Option<String>,
+    pub name_in_db_matches_default: bool,
+    pub name_in_client: Option<String>,
+    pub fields: Vec<String>,
+}
+
+impl PrimaryKeyDefinition {
+    pub fn named_with_default_name_if_necessary(&self, default_name: Option<String>) -> Self {
+        let name_in_db = self.name_in_db.clone().or_else(|| default_name.clone());
+        let name_in_db_matches_default = name_in_db == default_name;
+        PrimaryKeyDefinition {
+            name_in_db,
+            name_in_db_matches_default,
+            name_in_client: self.name_in_client.clone(),
+            fields: self.fields.clone(),
+        }
+    }
 }
 
 /// A unique criteria is a set of fields through which a record can be uniquely identified.
@@ -65,7 +93,7 @@ impl Model {
             name,
             fields: vec![],
             indices: vec![],
-            id_fields: vec![],
+            primary_key: None,
             documentation: None,
             database_name,
             is_embedded: false,
@@ -166,11 +194,7 @@ impl Model {
 
     /// Finds the name of all id fields
     pub fn id_field_names(&self) -> Vec<String> {
-        let singular_id_field = self.singular_id_fields().next();
-        match singular_id_field {
-            Some(f) => vec![f.name.clone()],
-            None => self.id_fields.clone(),
-        }
+        self.primary_key.as_ref().map_or(vec![], |pk| pk.fields.clone())
     }
 
     /// This should match the logic in `prisma_models::Model::primary_identifier`.
@@ -204,7 +228,7 @@ impl Model {
     fn unique_criterias(&self, allow_optional: bool, disregard_unsupported: bool) -> Vec<UniqueCriteria> {
         let mut result = Vec::new();
 
-        let in_eligible = |field: &ScalarField| {
+        let ineligible = |field: &ScalarField| {
             if disregard_unsupported {
                 field.is_commented_out || matches!(field.field_type, FieldType::Unsupported(_))
             } else {
@@ -212,87 +236,67 @@ impl Model {
             }
         };
 
-        // first candidate: the singular id field
+        // first candidate: the primary key
         {
-            if let Some(x) = self.singular_id_fields().next() {
-                if !in_eligible(x) && (x.is_required() || allow_optional) {
-                    result.push(UniqueCriteria::new(vec![x]))
-                }
-            }
-        }
-
-        // second candidate: the multi field id
-        {
-            let id_fields: Vec<_> = self
-                .id_fields
-                .iter()
-                .map(|f| self.find_scalar_field(&f).unwrap())
-                .collect();
+            let id_fields: Vec<_> = self.primary_key.as_ref().map_or(vec![], |pk| {
+                pk.fields.iter().map(|f| self.find_scalar_field(&f).unwrap()).collect()
+            });
 
             if !id_fields.is_empty()
                 && !id_fields
                     .iter()
-                    .any(|f| in_eligible(f) || (f.is_optional() && !allow_optional))
+                    .any(|f| ineligible(f) || (f.is_optional() && !allow_optional))
             {
                 result.push(UniqueCriteria::new(id_fields));
             }
         }
 
-        // third candidate: a required scalar field with a unique index.
+        // second candidate: any unique constraint where all fields are required
         {
-            let mut unique_required_fields: Vec<_> = self
-                .scalar_fields()
-                .filter(|field| field.is_unique && (field.is_required() || allow_optional) && !in_eligible(field))
-                .map(|f| UniqueCriteria::new(vec![f]))
-                .collect();
-
-            result.append(&mut unique_required_fields);
-        }
-
-        // fourth candidate: any multi-field unique constraint where all fields are required
-        {
-            let mut unique_field_combi = self
+            let mut unique_field_combi: Vec<UniqueCriteria> = self
                 .indices
                 .iter()
                 .filter(|id| id.tpe == IndexType::Unique)
                 .filter_map(|id| {
                     let fields: Vec<_> = id.fields.iter().map(|f| self.find_scalar_field(&f).unwrap()).collect();
-                    let no_fields_are_commented_out = !fields.iter().any(|f| in_eligible(f));
+                    let no_fields_are_ineligible = !fields.iter().any(|f| ineligible(f));
                     let all_fields_are_required = fields.iter().all(|f| f.is_required());
-                    if (all_fields_are_required || allow_optional) && no_fields_are_commented_out {
-                        Some(UniqueCriteria::new(fields))
-                    } else {
-                        None
-                    }
+                    ((all_fields_are_required || allow_optional) && no_fields_are_ineligible)
+                        .then(|| UniqueCriteria::new(fields))
                 })
                 .collect();
 
-            result.append(&mut unique_field_combi)
+            unique_field_combi.sort_by_key(|c| c.fields.len());
+
+            result.extend(unique_field_combi)
         }
 
         result
     }
 
     pub fn field_is_indexed(&self, field_name: &str) -> bool {
-        let field = self.find_field(field_name).unwrap();
+        if let Some(field) = self.find_field(field_name) {
+            if field.is_id() || field.is_unique() {
+                return true;
+            }
 
-        if field.is_id() || field.is_unique() {
-            return true;
+            let is_first_in_index = self
+                .indices
+                .iter()
+                .any(|index| index.fields.first().unwrap() == field_name);
+
+            let is_first_in_primary_key =
+                matches!(&self.primary_key, Some(pk) if pk.fields.first().unwrap() == field_name);
+
+            return is_first_in_index || is_first_in_primary_key;
         }
 
-        let is_first_in_index = self
-            .indices
-            .iter()
-            .any(|index| index.fields.first().unwrap() == field_name);
-
-        let is_first_in_primary_key = matches!(self.id_fields.first(), Some(f) if f == field_name);
-
-        is_first_in_index || is_first_in_primary_key
+        false
     }
 
     /// Finds the name of all id fields
     pub fn singular_id_fields(&self) -> impl std::iter::Iterator<Item = &ScalarField> {
-        self.scalar_fields().filter(|x| x.is_id)
+        self.scalar_fields().filter(|x| x.is_id())
     }
 
     /// Finds all fields defined as autoincrement
@@ -301,8 +305,13 @@ impl Model {
     }
 
     /// Determines whether there is a singular primary key
-    pub fn has_single_id_field(&self) -> bool {
-        self.singular_id_fields().count() == 1
+    pub fn has_singular_id(&self) -> bool {
+        matches!(&self.primary_key, Some(pk) if pk.fields.len() == 1)
+    }
+
+    /// Determines whether there is a singular primary key
+    pub fn has_compound_id(&self) -> bool {
+        matches!(&self.primary_key, Some(pk) if pk.fields.len() > 1)
     }
 
     pub fn add_index(&mut self, index: IndexDefinition) {

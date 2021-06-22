@@ -15,6 +15,10 @@ use std::{borrow::Cow, collections::BTreeMap};
 pub trait Connector: Send + Sync {
     fn name(&self) -> &str;
 
+    fn is_empty_default(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> &[ConnectorCapability];
 
     fn has_capability(&self, capability: ConnectorCapability) -> bool {
@@ -58,6 +62,8 @@ pub trait Connector: Send + Sync {
     /// This function is used during introspection to turn an introspected native type into an instance that can be put into the Prisma schema.
     /// powers IE
     fn introspect_native_type(&self, native_type: serde_json::Value) -> Result<NativeTypeInstance, ConnectorError>;
+
+    fn constraint_name_length(&self) -> usize;
 
     fn set_config_dir<'a>(&self, config_dir: &std::path::Path, url: &'a str) -> Cow<'a, str> {
         let set_root = |path: &str| {
@@ -106,6 +112,10 @@ pub trait Connector: Send + Sync {
 
     fn supports_enums(&self) -> bool {
         self.has_capability(ConnectorCapability::Enums)
+    }
+
+    fn supports_named_primary_keys(&self) -> bool {
+        self.has_capability(ConnectorCapability::NamedPrimaryKeys)
     }
 
     fn supports_json(&self) -> bool {
@@ -176,6 +186,7 @@ pub enum ConnectorCapability {
     AutoIncrementMultipleAllowed,
     AutoIncrementNonIndexedAllowed,
     RelationFieldsInArbitraryOrder,
+    NamedPrimaryKeys,
 
     // start of Query Engine Capabilities
     InsensitiveFilters,

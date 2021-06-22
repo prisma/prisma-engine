@@ -1,4 +1,5 @@
 use crate::error::Error;
+use datamodel::common::preview_features::PreviewFeature;
 use datamodel::{Configuration, Datamodel};
 use introspection_connector::{ConnectorResult, DatabaseMetadata, IntrospectionConnector, IntrospectionResultOutput};
 use jsonrpc_core::BoxFuture;
@@ -64,6 +65,8 @@ impl RpcImpl {
         let config = datamodel::parse_configuration(&schema)
             .map_err(|diagnostics| Error::DatamodelError(diagnostics.to_pretty_string("schema.prisma", schema)))?;
 
+        let preview_features: Vec<PreviewFeature> = config.subject.preview_features().map(|x| x.to_owned()).collect();
+
         let url = config
             .subject
             .datasources
@@ -75,7 +78,7 @@ impl RpcImpl {
         Ok((
             config.subject,
             url.clone(),
-            Box::new(SqlIntrospectionConnector::new(&url).await?),
+            Box::new(SqlIntrospectionConnector::new(&url, preview_features).await?),
         ))
     }
 
@@ -87,7 +90,8 @@ impl RpcImpl {
     }
 
     pub async fn introspect_internal(schema: String, force: bool) -> RpcResult<IntrospectionResultOutput> {
-        let (config, url, connector) = RpcImpl::load_connector(&schema).await?;
+        let (config, url, connector) = RpcImpl::load_connector(&schema).await?; //todo
+        let (config2, _, _) = RpcImpl::load_connector(&schema).await?;
 
         let input_data_model = if !force {
             Self::parse_datamodel(&schema)?
@@ -95,7 +99,12 @@ impl RpcImpl {
             Datamodel::new()
         };
 
-        let result = match connector.introspect(&input_data_model).await {
+        let first_source = config2.datasources.into_iter().next().unwrap();
+
+        let result = match connector
+            .introspect(&input_data_model, first_source.name, first_source.active_connector)
+            .await
+        {
             Ok(introspection_result) => {
                 if introspection_result.data_model.is_empty() {
                     Err(Error::IntrospectionResultEmpty(url.to_string()))

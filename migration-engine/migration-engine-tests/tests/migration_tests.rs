@@ -12,9 +12,261 @@ mod schema_push;
 use migration_engine_tests::sql::*;
 use pretty_assertions::assert_eq;
 use prisma_value::PrismaValue;
+use quaint::connector::SqlFamily;
 use quaint::prelude::Queryable;
 use sql_schema_describer::*;
 use test_macros::test_connector;
+
+#[test_connector]
+async fn adding_a_scalar_field_must_work(api: &TestApi) -> TestResult {
+    let dm = api.datamodel_with_provider(
+        r#"
+        model Test {
+            id          String @id @default(cuid())
+            int         Int
+            bigInt      BigInt
+            float       Float
+            boolean     Boolean
+            string      String
+            dateTime    DateTime
+            decimal     Decimal
+            bytes       Bytes
+        }
+    "#,
+    );
+
+    api.schema_push(&dm).send().await?.assert_green_bang();
+
+    api.assert_schema().await?.assert_table("Test", |table| {
+        table
+            .assert_columns_count(9)
+            .assert_column("int", |c| {
+                c.assert_is_required().assert_type_family(ColumnTypeFamily::Int)
+            })
+            .assert_column("bigInt", |c| {
+                c.assert_is_required().assert_type_family(ColumnTypeFamily::BigInt)
+            })
+            .assert_column("float", |c| {
+                c.assert_is_required().assert_type_family(ColumnTypeFamily::Float)
+            })
+            .assert_column("boolean", |c| {
+                c.assert_is_required().assert_type_family(ColumnTypeFamily::Boolean)
+            })
+            .assert_column("string", |c| {
+                c.assert_is_required().assert_type_family(ColumnTypeFamily::String)
+            })
+            .assert_column("dateTime", |c| {
+                c.assert_is_required().assert_type_family(ColumnTypeFamily::DateTime)
+            })
+            .assert_column("decimal", |c| {
+                c.assert_is_required().assert_type_family(ColumnTypeFamily::Decimal)
+            })
+            .assert_column("bytes", |c| {
+                c.assert_is_required().assert_type_family(ColumnTypeFamily::Binary)
+            })
+    });
+
+    // Check that the migration is idempotent.
+    api.schema_push(dm).send().await?.assert_green_bang().assert_no_steps();
+    Ok(())
+}
+
+#[test_connector(capabilities(Enums))]
+async fn adding_an_enum_field_must_work(api: &TestApi) -> TestResult {
+    let dm = r#"
+        model Test {
+            id String @id @default(cuid())
+            enum MyEnum
+        }
+
+        enum MyEnum {
+            A
+            B
+        }
+    "#;
+
+    api.schema_push(dm).send().await?.assert_green_bang();
+
+    api.assert_schema().await?.assert_table("Test", |table| {
+        table
+            .assert_columns_count(2)
+            .assert_column("enum", |c| match api.sql_family() {
+                SqlFamily::Postgres => c
+                    .assert_is_required()
+                    .assert_type_family(ColumnTypeFamily::Enum("MyEnum".to_owned())),
+                SqlFamily::Mysql => c.assert_is_required().assert_type_family(ColumnTypeFamily::Enum(
+                    api.normalize_identifier("Test_enum").into_owned(),
+                )),
+                _ => c.assert_is_required().assert_type_is_string(),
+            })
+    });
+
+    // Check that the migration is idempotent.
+    api.schema_push(dm).send().await?.assert_no_steps();
+
+    Ok(())
+}
+
+#[test_connector(capabilities(Enums))]
+async fn adding_an_enum_field_must_work_with_native_types_off(api: &TestApi) -> TestResult {
+    let dm = r#"
+        model Test {
+            id String @id @default(cuid())
+            enum MyEnum
+        }
+
+        enum MyEnum {
+            A
+            B
+        }
+    "#;
+
+    api.schema_push(dm).send().await?.assert_green_bang();
+
+    api.assert_schema().await?.assert_table("Test", |table| {
+        table
+            .assert_columns_count(2)
+            .assert_column("enum", |c| match api.sql_family() {
+                SqlFamily::Postgres => c
+                    .assert_is_required()
+                    .assert_type_family(ColumnTypeFamily::Enum("MyEnum".to_owned())),
+                SqlFamily::Mysql => c
+                    .assert_is_required()
+                    .assert_type_family(ColumnTypeFamily::Enum(api.normalize_identifier("Test_enum").into())),
+                _ => c.assert_is_required().assert_type_is_string(),
+            })
+    });
+
+    // Check that the migration is idempotent.
+    api.schema_push(dm).send().await?.assert_no_steps();
+
+    Ok(())
+}
+
+#[test_connector(capabilities(Json), exclude(Mysql))]
+async fn json_fields_can_be_created(api: &TestApi) -> TestResult {
+    let dm = format!(
+        r#"
+            {}
+
+            model Test {{
+                id String @id @default(cuid())
+                javaScriptObjectNotation Json
+            }}
+        "#,
+        api.datasource()
+    );
+
+    api.schema_push(&dm).send().await?.assert_green_bang();
+
+    api.assert_schema().await?.assert_table("Test", |table| {
+        table.assert_column("javaScriptObjectNotation", |c| {
+            if api.is_mariadb() {
+                // JSON is an alias for LONGTEXT on MariaDB - https://mariadb.com/kb/en/json-data-type/
+                c.assert_is_required().assert_type_family(ColumnTypeFamily::String)
+            } else {
+                c.assert_is_required().assert_type_family(ColumnTypeFamily::Json)
+            }
+        })
+    });
+
+    api.schema_push(&dm).send().await?.assert_green_bang().assert_no_steps();
+
+    Ok(())
+}
+
+#[test_connector]
+async fn adding_an_optional_field_must_work(api: &TestApi) -> TestResult {
+    let dm2 = r#"
+        model Test {
+            id String @id @default(cuid())
+            field String?
+        }
+    "#;
+
+    api.schema_push(dm2).send().await?.assert_green_bang();
+    api.assert_schema().await?.assert_table("Test", |table| {
+        table.assert_column("field", |column| column.assert_default(None).assert_is_nullable())
+    });
+
+    Ok(())
+}
+
+#[test_connector]
+async fn adding_an_id_field_with_a_special_name_must_work(api: &TestApi) -> TestResult {
+    let dm2 = r#"
+        model Test {
+            specialName String @id @default(cuid())
+        }
+    "#;
+
+    api.schema_push(dm2).send().await?.assert_green_bang();
+
+    api.assert_schema()
+        .await?
+        .assert_table("Test", |table| table.assert_has_column("specialName"));
+
+    Ok(())
+}
+
+#[test_connector(exclude(Sqlite))]
+async fn adding_an_id_field_of_type_int_must_work(api: TestApi) -> TestResult {
+    let dm2 = r#"
+        model Test {
+            myId Int @id
+            text String
+        }
+    "#;
+
+    api.schema_push(dm2).send().await?.assert_green_bang();
+
+    api.assert_schema().await?.assert_table("Test", |table| {
+        table.assert_column("myId", |col| col.assert_no_auto_increment())
+    });
+
+    Ok(())
+}
+
+#[test_connector(tags(Sqlite))]
+async fn adding_an_id_field_of_type_int_must_work_for_sqlite(api: &TestApi) -> TestResult {
+    let dm2 = r#"
+        model Test {
+            myId Int @id
+            text String
+        }
+    "#;
+
+    api.schema_push(dm2).send().await?.assert_green_bang();
+
+    api.assert_schema().await?.assert_table("Test", |table| {
+        table.assert_column("myId", |col| col.assert_auto_increments())
+    });
+
+    Ok(())
+}
+
+#[test_connector]
+async fn adding_an_id_field_of_type_int_with_autoincrement_works(api: &TestApi) -> TestResult {
+    let dm2 = r#"
+        model Test {
+            myId Int @id @default(autoincrement())
+            text String
+        }
+    "#;
+
+    api.schema_push(dm2).send().await?.assert_green_bang();
+    api.assert_schema().await?.assert_table("Test", |t| {
+        t.assert_column("myId", |c| {
+            if api.is_postgres() {
+                c.assert_default(Some(DefaultValue::sequence("Test_myId_seq")))
+            } else {
+                c.assert_auto_increments()
+            }
+        })
+    });
+
+    Ok(())
+}
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>;
 
@@ -1172,31 +1424,26 @@ async fn join_tables_between_models_with_mapped_compound_primary_keys_must_work(
 
 #[test_connector]
 async fn switching_databases_must_work(api: &TestApi) -> TestResult {
-    let dm1 = r#"
-        datasource db {
-            provider = "sqlite"
-            url = "file:dev.db"
-        }
-
+    let dm1 = api.datamodel_with_provider(
+        r#"
         model Test {
             id String @id
             name String
         }
-    "#;
+    "#,
+    );
 
     api.schema_push(dm1).send().await?.assert_green_bang();
 
-    let dm2 = r#"
-        datasource db {
-            provider = "sqlite"
-            url = "file:hiya.db"
-        }
-
+    //todo modify connection string
+    let dm2 = api.datamodel_with_provider(
+        r#"
         model Test {
             id String @id
             name String
         }
-    "#;
+    "#,
+    );
 
     api.schema_push(dm2)
         .migration_id(Some("mig2"))

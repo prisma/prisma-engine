@@ -35,6 +35,7 @@ pub trait RelationFieldAsserts {
     fn assert_relation_delete_strategy(&self, t: dml::OnDeleteStrategy) -> &Self;
     fn assert_relation_referenced_fields(&self, t: &[&str]) -> &Self;
     fn assert_relation_base_fields(&self, t: &[&str]) -> &Self;
+    fn assert_relation_fk_name(&self, t: Option<String>) -> &Self;
     fn assert_ignored(&self, state: bool) -> &Self;
 }
 
@@ -47,6 +48,7 @@ pub trait ModelAsserts {
     fn assert_with_documentation(&self, t: &str) -> &Self;
     fn assert_has_index(&self, def: IndexDefinition) -> &Self;
     fn assert_has_id_fields(&self, fields: &[&str]) -> &Self;
+    fn assert_has_named_pk(&self, name: &str) -> &Self;
     fn assert_ignored(&self, state: bool) -> &Self;
 }
 
@@ -154,12 +156,12 @@ impl ScalarFieldAsserts for dml::ScalarField {
     }
 
     fn assert_is_id(&self) -> &Self {
-        assert!(self.is_id);
+        assert!(self.primary_key.is_some());
         self
     }
 
     fn assert_is_unique(&self, b: bool) -> &Self {
-        assert_eq!(self.is_unique, b);
+        assert_eq!(self.is_unique.is_some(), b);
         self
     }
 
@@ -217,6 +219,11 @@ impl RelationFieldAsserts for dml::RelationField {
         self
     }
 
+    fn assert_relation_fk_name(&self, t: Option<String>) -> &Self {
+        assert_eq!(self.relation_info.fk_name, t);
+        self
+    }
+
     fn assert_ignored(&self, state: bool) -> &Self {
         assert_eq!(self.is_ignored, state);
         self
@@ -271,7 +278,12 @@ impl ModelAsserts for dml::Model {
     }
 
     fn assert_has_id_fields(&self, fields: &[&str]) -> &Self {
-        assert_eq!(self.id_fields, fields);
+        assert_eq!(self.primary_key.as_ref().unwrap().fields, fields);
+        self
+    }
+
+    fn assert_has_named_pk(&self, name: &str) -> &Self {
+        assert_eq!(self.primary_key.as_ref().unwrap().name_in_db, Some(name.to_string()));
         self
     }
 

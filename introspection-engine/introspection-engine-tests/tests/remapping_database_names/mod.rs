@@ -33,7 +33,8 @@ async fn remapping_fields_with_invalid_characters(api: &TestApi) -> TestResult {
     api.barrel()
         .execute(|migration| {
             migration.create_table("User", |t| {
-                t.add_column("id", types::primary());
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("User_pkey", types::primary_constraint(&["id"]));
                 t.add_column("_a", types::text());
                 t.add_column("*b", types::text());
                 t.add_column("?c", types::text());
@@ -78,11 +79,13 @@ async fn remapping_tables_with_invalid_characters(api: &TestApi) -> TestResult {
     api.barrel()
         .execute(|migration| {
             migration.create_table("?User", |t| {
-                t.add_column("id", types::primary());
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("?User_pkey", types::primary_constraint(&["id"]));
             });
 
             migration.create_table("User with Space", |t| {
-                t.add_column("id", types::primary());
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("User with Space_pkey", types::primary_constraint(&["id"]));
             });
         })
         .await?;
@@ -111,17 +114,18 @@ async fn remapping_models_in_relations(api: &TestApi) -> TestResult {
     api.barrel()
         .execute(|migration| {
             migration.create_table("User with Space", |t| {
-                t.add_column("id", types::primary());
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("User with Space_pkey", types::primary_constraint(&["id"]));
             });
 
             migration.create_table("Post", |t| {
-                t.add_column("id", types::primary());
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("Post_pkey", types::primary_constraint(&["id"]));
                 t.add_column("user_id", types::integer());
-                t.add_foreign_key(&["user_id"], "User with Space", &["id"]);
-
+                t.add_index("Post_user_id_key", types::index(vec!["user_id"]).unique(true));
                 t.add_constraint(
-                    "post_user_unique",
-                    types::unique_constraint(vec!["user_id"]).unique(true),
+                    "Post_user_id_fkey",
+                    types::foreign_constraint(&["user_id"], "User with Space", &["id"], None, None),
                 );
             });
         })
@@ -154,15 +158,22 @@ async fn remapping_models_in_relations_should_not_map_virtual_fields(api: &TestA
     api.barrel()
         .execute(|migration| {
             migration.create_table("User", |t| {
-                t.add_column("id", types::primary());
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("User_pkey", types::primary_constraint(&["id"]));
             });
 
             migration.create_table("Post With Space", |t| {
-                t.add_column("id", types::primary());
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("Post With Space_pkey", types::primary_constraint(&["id"]));
                 t.add_column("user_id", types::integer());
-                t.add_foreign_key(&["user_id"], "User", &["id"]);
-
-                t.add_constraint("post_user_unique", types::unique_constraint(vec!["user_id"]));
+                t.add_index(
+                    "Post With Space_user_id_key",
+                    types::index(vec!["user_id"]).unique(true),
+                );
+                t.add_constraint(
+                    "Post With Space_user_id_fkey",
+                    types::foreign_constraint(&["user_id"], "User", &["id"], None, None),
+                );
             });
         })
         .await?;
@@ -189,64 +200,54 @@ async fn remapping_models_in_relations_should_not_map_virtual_fields(api: &TestA
 
 #[test_connector]
 async fn remapping_models_in_compound_relations(api: &TestApi) -> TestResult {
-    let post_constraint = if api.sql_family().is_sqlite() {
-        "sqlite_autoindex_Post_1"
-    } else {
-        "post_user_unique"
-    };
-
-    let user_constraint = if api.sql_family().is_sqlite() {
-        "sqlite_autoindex_User with Space_1"
-    } else {
-        "user_unique"
-    };
-
     api.barrel()
         .execute(move |migration| {
             migration.create_table("User with Space", move |t| {
-                t.add_column("id", types::primary());
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("User with Space_pkey", types::primary_constraint(&["id"]));
                 t.add_column("age", types::integer());
-
-                t.add_constraint(user_constraint, types::unique_constraint(vec!["id", "age"]));
+                t.add_index(
+                    "User with Space_id_age_key",
+                    types::index(vec!["id", "age"]).unique(true),
+                );
             });
 
             migration.create_table("Post", move |t| {
-                t.add_column("id", types::primary());
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("Post_pkey", types::primary_constraint(&["id"]));
                 t.add_column("user_id", types::integer());
                 t.add_column("user_age", types::integer());
-
-                t.add_foreign_key(&["user_id", "user_age"], "User with Space", &["id", "age"]);
-
                 t.add_constraint(
-                    post_constraint,
-                    types::unique_constraint(vec!["user_id", "user_age"]).unique(true),
+                    "Post_user_id_user_age_fkey",
+                    types::foreign_constraint(&["user_id", "user_age"], "User with Space", &["id", "age"], None, None),
+                );
+                t.add_index(
+                    "Post_user_id_user_age_key",
+                    types::index(vec!["user_id", "user_age"]).unique(true),
                 );
             });
         })
         .await?;
 
-    let dm = format!(
-        r#"
-        model Post {{
+    let dm = r#"
+        model Post {
             id              Int             @id @default(autoincrement())
             user_id         Int
             user_age        Int
             User_with_Space User_with_Space @relation(fields: [user_id, user_age], references: [id, age])
 
-            @@unique([user_id, user_age], name: "{}")
-        }}
+            @@unique([user_id, user_age])
+        }
 
-        model User_with_Space {{
+        model User_with_Space {
             id   Int   @id @default(autoincrement())
             age  Int
             Post Post?
 
             @@map("User with Space")
-            @@unique([id, age], name: "{}")
-        }}
-    "#,
-        post_constraint, user_constraint
-    );
+            @@unique([id, age])
+        }
+    "#;
 
     api.assert_eq_datamodels(&dm, &api.introspect().await?);
 
@@ -255,66 +256,59 @@ async fn remapping_models_in_compound_relations(api: &TestApi) -> TestResult {
 
 #[test_connector]
 async fn remapping_fields_in_compound_relations(api: &TestApi) -> TestResult {
-    let user_post_constraint = if api.sql_family().is_sqlite() {
-        "sqlite_autoindex_Post_1"
-    } else {
-        "post_user_unique"
-    };
-
-    let user_constraint = if api.sql_family().is_sqlite() {
-        "sqlite_autoindex_User_1"
-    } else {
-        "user_unique"
-    };
-
     api.barrel()
         .execute(move |migration| {
             migration.create_table("User", move |t| {
-                t.add_column("id", types::primary());
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("User_pkey", types::primary_constraint(&["id"]));
                 t.add_column("age-that-is-invalid", types::integer());
-
-                t.add_constraint(
-                    user_constraint,
-                    types::unique_constraint(vec!["id", "age-that-is-invalid"]),
+                t.add_index(
+                    "User_id_age-that-is-invalid_key",
+                    types::index(vec!["id", "age-that-is-invalid"]).unique(true),
                 );
             });
 
             migration.create_table("Post", move |t| {
-                t.add_column("id", types::primary());
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("Post_pkey", types::primary_constraint(&["id"]));
                 t.add_column("user_id", types::integer());
                 t.add_column("user_age", types::integer());
-
-                t.add_foreign_key(&["user_id", "user_age"], "User", &["id", "age-that-is-invalid"]);
-
                 t.add_constraint(
-                    user_post_constraint,
-                    types::unique_constraint(vec!["user_id", "user_age"]),
+                    "Post_user_id_user_age_fkey",
+                    types::foreign_constraint(
+                        &["user_id", "user_age"],
+                        "User",
+                        &["id", "age-that-is-invalid"],
+                        None,
+                        None,
+                    ),
+                );
+                t.add_index(
+                    "Post_user_id_user_age_key",
+                    types::index(vec!["user_id", "user_age"]).unique(true),
                 );
             });
         })
         .await?;
 
-    let dm = format!(
-        r#"
-        model Post {{
+    let dm = r#"
+        model Post {
             id       Int  @id @default(autoincrement())
             user_id  Int
             user_age Int
             User     User @relation(fields: [user_id, user_age], references: [id, age_that_is_invalid])
 
-            @@unique([user_id, user_age], name: "{}")
-        }}
+            @@unique([user_id, user_age])
+        }
 
-        model User {{
+        model User {
             id                  Int   @id @default(autoincrement())
             age_that_is_invalid Int   @map("age-that-is-invalid")
             Post                Post?
 
-            @@unique([id, age_that_is_invalid], name: "{}")
-        }}
-    "#,
-        user_post_constraint, user_constraint
-    );
+            @@unique([id, age_that_is_invalid])
+        }
+    "#;
 
     api.assert_eq_datamodels(&dm, &api.introspect().await?);
 
@@ -334,8 +328,8 @@ async fn remapping_enum_names(api: &TestApi) -> TestResult {
     api.barrel()
         .execute(move |migration| {
             migration.create_table("123Book", move |t| {
-                t.add_column("id", types::primary());
-
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("123Book_pkey", types::primary_constraint(&["id"]));
                 let typ = if sql_family.is_mysql() {
                     "ENUM ('black')"
                 } else {
@@ -390,8 +384,8 @@ async fn remapping_enum_values(api: &TestApi) -> TestResult {
     api.barrel()
         .execute(move |migration| {
             migration.create_table("Book", move |t| {
-                t.add_column("id", types::primary());
-
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("Book_pkey", types::primary_constraint(&["id"]));
                 let typ = if sql_family.is_mysql() {
                     "ENUM ('b lack', 'w hite')"
                 } else {
@@ -438,8 +432,8 @@ async fn remapping_enum_default_values(api: &TestApi) -> TestResult {
     api.barrel()
         .execute(move |migration| {
             migration.create_table("Book", move |t| {
-                t.add_column("id", types::primary());
-
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("Book_pkey", types::primary_constraint(&["id"]));
                 let typ = if sql_family.is_mysql() {
                     "ENUM ('b lack', 'white')"
                 } else {
@@ -480,7 +474,7 @@ async fn remapping_compound_primary_keys(api: &TestApi) -> TestResult {
             migration.create_table("User", |t| {
                 t.add_column("first_name", types::integer());
                 t.add_column("last@name", types::integer());
-                t.set_primary_key(&["first_name", "last@name"]);
+                t.add_constraint("User_pkey", types::primary_constraint(&["first_name", "last@name"]));
             });
         })
         .await?;
@@ -496,5 +490,71 @@ async fn remapping_compound_primary_keys(api: &TestApi) -> TestResult {
 
     api.assert_eq_datamodels(dm, &api.introspect().await?);
 
+    Ok(())
+}
+
+#[test_connector]
+async fn not_automatically_remapping_invalid_compound_unique_key_names(api: &TestApi) -> TestResult {
+    api.barrel()
+        .execute(|migration| {
+            migration.create_table("User", |t| {
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("User_pkey", types::primary_constraint(&["id"]));
+                t.add_column("first", types::integer());
+                t.add_column("last", types::integer());
+                t.add_index(
+                    "User.something@invalid-and/weird",
+                    types::index(&["first", "last"]).unique(true),
+                );
+            });
+        })
+        .await?;
+
+    let dm = indoc! {r#"
+        model User {
+            id     Int @id @default(autoincrement()) 
+            first  Int
+            last   Int
+
+            @@unique([first, last], map: "User.something@invalid-and/weird")
+        }
+    "#};
+
+    api.assert_eq_datamodels(dm, &api.introspect().await?);
+
+    Ok(())
+}
+
+#[test_connector]
+async fn not_automatically_remapping_invalid_compound_primary_key_names(api: &TestApi) -> TestResult {
+    api.barrel()
+        .execute(|migration| {
+            migration.create_table("User", |t| {
+                t.add_column("first", types::integer());
+                t.add_column("last", types::integer());
+                t.add_constraint(
+                    "User.something@invalid-and/weird",
+                    types::primary_constraint(&["first", "last"]).unique(true),
+                );
+            });
+        })
+        .await?;
+
+    let pk_name = if api.sql_family().is_sqlite() || api.sql_family().is_mysql() {
+        ""
+    } else {
+        ", map: \"User.something@invalid-and/weird\""
+    };
+
+    let dm = format! {r#"
+        model User {{
+            first  Int
+            last   Int
+
+            @@id([first, last]{})
+        }}
+    "#, pk_name};
+
+    api.assert_eq_datamodels(&dm, &api.introspect().await?);
     Ok(())
 }

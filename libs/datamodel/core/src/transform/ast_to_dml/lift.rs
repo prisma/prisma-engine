@@ -1,12 +1,12 @@
 use super::super::attributes::AllAttributes;
 use super::db::ParserDatabase;
+use crate::ast::Identifier;
+use crate::common::datamodel_context::DatamodelContext;
+use crate::common::ConstraintNames;
+use crate::diagnostics::{DatamodelError, Diagnostics};
+use crate::dml::ScalarType;
 use crate::transform::helpers::ValueValidator;
-use crate::{ast, configuration, dml, Field, FieldType};
-use crate::{
-    ast::Identifier,
-    diagnostics::{DatamodelError, Diagnostics},
-};
-use crate::{dml::ScalarType, Datasource};
+use crate::{ast, dml, Field, FieldType, IndexType, PrimaryKeyDefinition};
 use datamodel_connector::connector_error::{ConnectorError, ErrorKind};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
@@ -19,7 +19,7 @@ use std::str::FromStr;
 /// semantics are attached.
 pub struct LiftAstToDml<'a> {
     attributes: AllAttributes,
-    source: Option<&'a configuration::Datasource>,
+    context: &'a DatamodelContext,
     db: &'a ParserDatabase<'a>,
 }
 
@@ -28,10 +28,10 @@ impl<'a> LiftAstToDml<'a> {
     /// the attributes defined by the given sources registered.
     ///
     /// The attributes defined by the given sources will be namespaced.
-    pub(crate) fn new(source: Option<&'a configuration::Datasource>, db: &'a ParserDatabase<'a>) -> LiftAstToDml<'a> {
+    pub(crate) fn new(context: &'a DatamodelContext, db: &'a ParserDatabase<'a>) -> LiftAstToDml<'a> {
         LiftAstToDml {
             attributes: AllAttributes::new(),
-            source,
+            context,
             db,
         }
     }
@@ -45,11 +45,11 @@ impl<'a> LiftAstToDml<'a> {
             match ast_obj {
                 ast::Top::Enum(en) => match self.lift_enum(&en) {
                     Ok(en) => schema.add_enum(en),
-                    Err(mut err) => errors.append(&mut err),
+                    Err(err) => errors.extend(err),
                 },
                 ast::Top::Model(ty) => match self.lift_model(&ty, ast_schema) {
                     Ok(md) => schema.add_model(md),
-                    Err(mut err) => errors.append(&mut err),
+                    Err(err) => errors.extend(err),
                 },
                 ast::Top::Source(_) => { /* Source blocks are explicitly ignored by the validator */ }
                 ast::Top::Generator(_) => { /* Generator blocks are explicitly ignored by the validator */ }
@@ -58,11 +58,7 @@ impl<'a> LiftAstToDml<'a> {
             }
         }
 
-        if errors.has_errors() {
-            Err(errors)
-        } else {
-            Ok(schema)
-        }
+        errors.errors_or(schema)
     }
 
     /// Internal: Validates a model AST node and lifts it to a DML model.
@@ -75,30 +71,126 @@ impl<'a> LiftAstToDml<'a> {
         for ast_field in &ast_model.fields {
             match self.lift_field(ast_field, ast_schema) {
                 Ok(field) => model.add_field(field),
-                Err(mut err) => errors.append(&mut err),
+                Err(err) => errors.extend(err),
             }
         }
 
-        if let Err(mut err) = self.attributes.model.validate_and_apply(ast_model, &mut model) {
-            errors.append(&mut err);
+        if let Err(err) = self.attributes.model.validate_and_apply(ast_model, &mut model) {
+            errors.extend(err);
         }
 
-        if errors.has_errors() {
-            return Err(errors);
+        // transfer primary keys from field level to model level and name them
+        let supports_named_pks = self.context.connector.supports_named_primary_keys();
+
+        if model.singular_id_fields().next().is_some() {
+            let model_name = model.database_name.as_ref().unwrap_or(&model.name).clone();
+            {
+                if let Some(f) = model.scalar_fields_mut().find(|f| f.is_id()) {
+                    if let Some(mut pk) = f.primary_key.as_mut() {
+                        let default_name = ConstraintNames::primary_key_name(&model_name, self.context);
+                        if pk.name_in_db.is_none() && supports_named_pks {
+                            pk.name_in_db = default_name;
+                        }
+                        pk.name_in_db_matches_default =
+                            ConstraintNames::primary_key_name_matches(pk.name_in_db.clone(), &model_name, self.context);
+                    }
+                }
+            }
+            let id_field = model.scalar_fields_mut().find(|f| f.is_id());
+            model.primary_key = id_field.and_then(|f| f.primary_key.clone());
+        }
+        {
+            if matches!(&model.primary_key, Some(pk) if pk.name_in_db.is_some() && !supports_named_pks) {
+                errors.push_error(DatamodelError::new_model_validation_error(
+
+                        "You defined a database name for the primary key on the model. This is not supported by the provider.",
+                    &ast_model.name.name,
+                    ast_model.span,
+                ));
+                return Err(errors);
+            }
+        }
+        {
+            if supports_named_pks {
+                let model_name = model.database_name.as_ref().unwrap_or(&model.name).clone();
+                let pk = model.primary_key.map(|pk| {
+                    let default_name = ConstraintNames::primary_key_name(&model_name, self.context);
+                    let name_in_db = pk.name_in_db.clone().or_else(|| default_name.clone());
+                    let name_in_db_matches_default =
+                        ConstraintNames::primary_key_name_matches(name_in_db.clone(), &model_name, self.context);
+                    PrimaryKeyDefinition {
+                        name_in_db,
+                        name_in_db_matches_default,
+                        name_in_client: pk.name_in_client.clone(),
+                        fields: pk.fields,
+                    }
+                });
+                model.primary_key = pk;
+            }
         }
 
-        Ok(model)
+        // model level index definitions
+        {
+            let model_name = model.name.clone();
+            for mut index in &mut model.indices {
+                let default_name =
+                    ConstraintNames::index_name(&model_name, index.fields.clone(), index.tpe, self.context);
+                if index.name_in_db.is_empty() {
+                    index.name_in_db = default_name.clone();
+                }
+                index.name_in_db_matches_default = index.name_in_db == default_name;
+            }
+        }
+
+        // transfer indexes from field level to model level and name them if names is empty
+        let mut indices_to_copy = vec![];
+        {
+            let model_name = model.name.clone();
+            for field in model.scalar_fields_mut() {
+                if let Some(index) = &mut field.is_unique {
+                    let default_name = ConstraintNames::index_name(
+                        &model_name,
+                        vec![field.name.clone()],
+                        IndexType::Unique,
+                        self.context,
+                    );
+
+                    if index.name_in_db.is_empty() {
+                        index.name_in_db = default_name.clone()
+                    }
+                    index.name_in_db_matches_default = default_name == index.name_in_db;
+
+                    indices_to_copy.push(index.clone())
+                }
+            }
+        }
+
+        {
+            let model_name = model.name.clone();
+            for rf in model.relation_fields_mut() {
+                let default_name = ConstraintNames::foreign_key_constraint_name(
+                    &model_name,
+                    rf.relation_info.fields.clone(),
+                    self.context,
+                );
+                if !rf.relation_info.fields.is_empty() && rf.relation_info.fk_name.is_none() {
+                    rf.relation_info.fk_name = Some(default_name.clone());
+                }
+                rf.relation_info.fk_name_matches_default = rf.relation_info.fk_name == Some(default_name);
+            }
+        }
+
+        //todo default value names as well for mssql
+
+        model.indices.append(&mut indices_to_copy);
+        errors.errors_or(model)
     }
 
     /// Internal: Validates an enum AST node.
     fn lift_enum(&self, ast_enum: &ast::Enum) -> Result<dml::Enum, Diagnostics> {
         let mut errors = Diagnostics::new();
 
-        let supports_enums = match self.source {
-            Some(source) => source.active_connector.supports_enums(),
-            None => true,
-        };
-        if !supports_enums {
+        if !self.context.connector.supports_enums() {
             errors.push_error(DatamodelError::new_validation_error(
                 &format!(
                     "You defined the enum `{}`. But the current connector does not support enums.",
@@ -114,7 +206,7 @@ impl<'a> LiftAstToDml<'a> {
         for ast_enum_value in &ast_enum.values {
             match self.lift_enum_value(ast_enum_value) {
                 Ok(value) => en.add_value(value),
-                Err(mut err) => errors.append(&mut err),
+                Err(err) => errors.extend(err),
             }
         }
 
@@ -127,15 +219,11 @@ impl<'a> LiftAstToDml<'a> {
 
         en.documentation = ast_enum.documentation.clone().map(|comment| comment.text);
 
-        if let Err(mut err) = self.attributes.enm.validate_and_apply(ast_enum, &mut en) {
-            errors.append(&mut err);
+        if let Err(err) = self.attributes.enm.validate_and_apply(ast_enum, &mut en) {
+            errors.extend(err);
         }
 
-        if errors.has_errors() {
-            Err(errors)
-        } else {
-            Ok(en)
-        }
+        errors.errors_or(en)
     }
 
     /// Internal: Validates an enum value AST node.
@@ -174,15 +262,11 @@ impl<'a> LiftAstToDml<'a> {
         // We merge attributes so we can fail on duplicates.
         let attributes = [&extra_attributes[..], &ast_field.attributes[..]].concat();
 
-        if let Err(mut err) = self.attributes.field.validate_and_apply(&attributes, &mut field) {
-            errors.append(&mut err);
+        if let Err(err) = self.attributes.field.validate_and_apply(&attributes, &mut field) {
+            errors.extend(err);
         }
 
-        if errors.has_errors() {
-            Err(errors)
-        } else {
-            Ok(field)
-        }
+        errors.errors_or(field)
     }
 
     /// Internal: Lift a field's arity.
@@ -206,17 +290,15 @@ impl<'a> LiftAstToDml<'a> {
         let type_ident: &Identifier = match &ast_field.field_type {
             ast::FieldType::Supported(ident) => ident,
             ast::FieldType::Unsupported(unsupported_lit, _) => {
-                return lift_unsupported_field_type(ast_field, unsupported_lit, self.source)
+                return self.lift_unsupported_field_type(ast_field, unsupported_lit)
             }
         };
 
         let type_name = &type_ident.name;
 
         if let Ok(scalar_type) = ScalarType::from_str(type_name) {
-            if let Some(source) = self.source {
-                let connector = &source.active_connector;
-
-                let prefix = format!("{}{}", source.name, ".");
+            if !self.context.connector.is_empty_default() {
+                let prefix = format!("{}{}", self.context.source_name.as_ref().unwrap(), ".");
 
                 let type_specifications_with_invalid_datasource_name = ast_field
                     .attributes
@@ -232,7 +314,7 @@ impl<'a> LiftAstToDml<'a> {
                     return Err(DatamodelError::new_connector_error(
                         &ConnectorError::from_kind(ErrorKind::InvalidPrefixForNativeTypes {
                             given_prefix: String::from(given_prefix),
-                            expected_prefix: source.name.clone(),
+                            expected_prefix: self.context.source_name.as_ref().unwrap().clone(),
                             suggestion: format!("{}{}", prefix, type_specification_name_split.next().unwrap()),
                         })
                         .to_string(),
@@ -267,13 +349,13 @@ impl<'a> LiftAstToDml<'a> {
                 };
 
                 if let Some(x) = type_specification.map(|dir| dir.name.name.trim_start_matches(&prefix)) {
-                    let constructor = if let Some(cons) = connector.find_native_type_constructor(x) {
+                    let constructor = if let Some(cons) = self.context.connector.find_native_type_constructor(x) {
                         cons
                     } else {
                         return Err(DatamodelError::new_connector_error(
                             &ConnectorError::from_kind(ErrorKind::NativeTypeNameUnknown {
                                 native_type: x.parse().unwrap(),
-                                connector_name: source.active_provider.clone(),
+                                connector_name: self.context.connector.name().to_string(),
                             })
                             .to_string(),
                             type_specification.unwrap().span,
@@ -318,7 +400,7 @@ impl<'a> LiftAstToDml<'a> {
                         ));
                     }
 
-                    let parse_native_type_result = connector.parse_native_type(x, args);
+                    let parse_native_type_result = self.context.connector.parse_native_type(x, args);
                     match parse_native_type_result {
                         Err(connector_error) => Err(DatamodelError::new_connector_error(
                             &connector_error.to_string(),
@@ -385,47 +467,48 @@ impl<'a> LiftAstToDml<'a> {
             ))
         }
     }
-}
 
-fn lift_unsupported_field_type(
-    ast_field: &ast::Field,
-    unsupported_lit: &str,
-    source: Option<&Datasource>,
-) -> Result<(dml::FieldType, Vec<ast::Attribute>), DatamodelError> {
-    static TYPE_REGEX: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"(?x)
+    fn lift_unsupported_field_type(
+        &self,
+        ast_field: &ast::Field,
+        unsupported_lit: &str,
+    ) -> Result<(dml::FieldType, Vec<ast::Attribute>), DatamodelError> {
+        static TYPE_REGEX: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r#"(?x)
     ^                           # beginning of the string
     (?P<prefix>[^(]+)           # a required prefix that is any character until the first opening brace
     (?:\((?P<params>.*?)\))?    # (optional) an opening parenthesis, a closing parenthesis and captured params in-between
     (?P<suffix>.+)?             # (optional) captured suffix after the params until the end of the string
     $                           # end of the string
     "#).unwrap()
-    });
+        });
 
-    if let Some(source) = source {
-        let connector = &source.active_connector;
+        if !self.context.connector.is_empty_default() {
+            if let Some(captures) = TYPE_REGEX.captures(unsupported_lit) {
+                let prefix = captures.name("prefix").unwrap().as_str().trim();
 
-        if let Some(captures) = TYPE_REGEX.captures(unsupported_lit) {
-            let prefix = captures.name("prefix").unwrap().as_str().trim();
+                let params = captures.name("params");
+                let args = match params {
+                    None => vec![],
+                    Some(params) => params.as_str().split(',').map(|s| s.trim().to_string()).collect(),
+                };
 
-            let params = captures.name("params");
-            let args = match params {
-                None => vec![],
-                Some(params) => params.as_str().split(',').map(|s| s.trim().to_string()).collect(),
-            };
+                if let Ok(native_type) = self.context.connector.parse_native_type(prefix, args) {
+                    let prisma_type = self
+                        .context
+                        .connector
+                        .scalar_type_for_native_type(native_type.serialized_native_type.clone());
 
-            if let Ok(native_type) = connector.parse_native_type(prefix, args) {
-                let prisma_type = connector.scalar_type_for_native_type(native_type.serialized_native_type.clone());
-
-                let msg = format!(
+                    let msg = format!(
                         "The type `Unsupported(\"{}\")` you specified in the type definition for the field `{}` is supported as a native type by Prisma. Please use the native type notation `{} @{}.{}` for full support.",
-                        unsupported_lit, ast_field.name.name, prisma_type.to_string(), &source.name, native_type.render()
+                        unsupported_lit, ast_field.name.name, prisma_type.to_string(), self.context.connector.name(), native_type.render()
                     );
 
-                return Err(DatamodelError::new_validation_error(&msg, ast_field.span));
+                    return Err(DatamodelError::new_validation_error(&msg, ast_field.span));
+                }
             }
         }
-    }
 
-    Ok((dml::FieldType::Unsupported(unsupported_lit.into()), vec![]))
+        Ok((dml::FieldType::Unsupported(unsupported_lit.into()), vec![]))
+    }
 }

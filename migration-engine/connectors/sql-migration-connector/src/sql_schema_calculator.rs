@@ -1,15 +1,14 @@
 mod sql_schema_calculator_flavour;
 
-pub(super) use sql_schema_calculator_flavour::SqlSchemaCalculatorFlavour;
-
-use crate::{flavour::SqlFlavour, sql_renderer::IteratorJoin};
+use crate::flavour::SqlFlavour;
 use datamodel::{walkers::RelationFieldWalker, Configuration};
 use datamodel::{
     walkers::{walk_models, walk_relations, ModelWalker, ScalarFieldWalker, TypeWalker},
     Datamodel, DefaultValue, FieldArity, IndexDefinition, IndexType, ScalarType,
 };
 use prisma_value::PrismaValue;
-use sql_schema_describer::{self as sql, walkers::SqlSchemaExt, ColumnType, ForeignKeyAction};
+pub(super) use sql_schema_calculator_flavour::SqlSchemaCalculatorFlavour;
+use sql_schema_describer::{self as sql, walkers::SqlSchemaExt, ColumnType, ForeignKeyAction, Index};
 
 pub(crate) fn calculate_sql_schema(
     (configuration, datamodel): (&Configuration, &Datamodel),
@@ -44,60 +43,49 @@ fn calculate_model_tables<'a>(
             .map(|field| column_for_scalar_field(&field, flavour))
             .collect();
 
-        let primary_key = Some(sql::PrimaryKey {
+        let primary_key = model.primary_key().map(|pk| sql::PrimaryKey {
             columns: model.id_fields().map(|field| field.db_name().to_owned()).collect(),
             sequence: None,
-            constraint_name: None,
-        })
-        .filter(|pk| !pk.columns.is_empty());
-
-        let single_field_indexes = model.scalar_fields().filter(|f| f.is_unique()).map(|f| sql::Index {
-            name: flavour.single_field_index_name(model.db_name(), f.db_name()),
-            columns: vec![f.db_name().to_owned()],
-            tpe: sql::IndexType::Unique,
+            constraint_name: pk.name_in_db.clone(),
         });
 
-        let multiple_field_indexes = model.indexes().map(|index_definition: &IndexDefinition| {
-            let referenced_fields: Vec<ScalarFieldWalker<'_>> = index_definition
-                .fields
-                .iter()
-                .map(|field_name| {
-                    model
-                        .find_scalar_field(field_name)
-                        .expect("Unknown field in index directive.")
-                })
-                .collect();
-
-            let index_type = match index_definition.tpe {
-                IndexType::Unique => sql::IndexType::Unique,
-                IndexType::Normal => sql::IndexType::Normal,
-            };
-
-            let index_name = index_definition.name.clone().unwrap_or_else(|| {
-                format!(
-                    "{table}.{fields}_{qualifier}",
-                    table = &model.db_name(),
-                    fields = referenced_fields.iter().map(|field| field.db_name()).join("_"),
-                    qualifier = if index_type.is_unique() { "unique" } else { "index" },
-                )
-            });
-
-            sql::Index {
-                name: index_name,
-                // The model index definition uses the model field names, but the SQL Index
-                // wants the column names.
-                columns: referenced_fields
+        let mut indices: Vec<Index> = model
+            .indexes()
+            .map(|index_definition: &IndexDefinition| {
+                let referenced_fields: Vec<ScalarFieldWalker<'_>> = index_definition
+                    .fields
                     .iter()
-                    .map(|field| field.db_name().to_owned())
-                    .collect(),
-                tpe: index_type,
-            }
-        });
+                    .map(|field_name| {
+                        model
+                            .find_scalar_field(field_name)
+                            .expect("Unknown field in index directive.")
+                    })
+                    .collect();
+
+                let index_type = match index_definition.tpe {
+                    IndexType::Unique => sql::IndexType::Unique,
+                    IndexType::Normal => sql::IndexType::Normal,
+                };
+
+                sql::Index {
+                    name: index_definition.name_in_db.clone(),
+                    // The model index definition uses the model field names, but the SQL Index
+                    // wants the column names.
+                    columns: referenced_fields
+                        .iter()
+                        .map(|field| field.db_name().to_owned())
+                        .collect(),
+                    tpe: index_type,
+                }
+            })
+            .collect();
+
+        indices.sort_by_key(|id| id.columns.len());
 
         let mut table = sql::Table {
             name: model.database_name().to_owned(),
             columns,
-            indices: single_field_indexes.chain(multiple_field_indexes).collect(),
+            indices,
             primary_key,
             foreign_keys: Vec::new(),
         };
@@ -124,7 +112,7 @@ fn push_inline_relations(model: ModelWalker<'_>, table: &mut sql::Table) {
         // Foreign key
         {
             let fk = sql::ForeignKey {
-                constraint_name: None,
+                constraint_name: relation_field.constraint_name(),
                 columns: fk_columns,
                 referenced_table: relation_field.referenced_model().database_name().to_owned(),
                 referenced_columns: relation_field.referenced_columns().map(String::from).collect(),

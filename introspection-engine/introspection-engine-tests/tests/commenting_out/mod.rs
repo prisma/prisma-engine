@@ -9,53 +9,40 @@ async fn a_table_without_uniques_should_ignore(api: &TestApi) -> TestResult {
     api.barrel()
         .execute(|migration| {
             migration.create_table("User", |t| {
-                t.add_column("id", types::primary());
+                t.add_column("id", types::boolean().nullable(false));
+                t.add_constraint("User_pkey", types::primary_constraint(&["id"]));
             });
             migration.create_table("Post", |t| {
                 t.add_column("id", types::integer());
-                t.add_column("user_id", types::integer().nullable(false));
-                t.add_foreign_key(&["user_id"], "User", &["id"]);
+                t.add_column("user_id", types::boolean().nullable(false));
+                t.add_index("Post_user_id_idx", types::index(&["user_id"]));
+                t.add_constraint(
+                    "Post_user_id_fkey",
+                    types::foreign_constraint(&["user_id"], "User", &["id"], None, None),
+                );
             });
         })
         .await?;
 
-    let dm = if api.sql_family().is_mysql() {
-        indoc! {r#"
+    let dm = indoc! {r#"
             /// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by the Prisma Client.
             model Post {
               id      Int
-              user_id Int
+              user_id Boolean
               User    User @relation(fields: [user_id], references: [id])
 
-              @@index([user_id], name: "user_id")
+              @@index([user_id])
               @@ignore
             }
 
             model User {
-              id   Int    @id @default(autoincrement())
+              id   Boolean    @id 
               Post Post[] @ignore
             }
-        "#}
-    } else {
-        indoc! {r#"
-            /// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by the Prisma Client.
-            model Post {
-              id      Int
-              user_id Int
-              User    User @relation(fields: [user_id], references: [id])
-
-              @@ignore
-            }
-
-            model User {
-              id   Int    @id @default(autoincrement())
-              Post Post[] @ignore
-            }
-        "#}
+        "#
     };
 
     api.assert_eq_datamodels(&dm, &api.introspect().await?);
-
     Ok(())
 }
 
@@ -104,7 +91,8 @@ async fn a_table_without_required_uniques(api: &TestApi) -> TestResult {
         .execute(|migration| {
             migration.create_table("Post", |t| {
                 t.add_column("id", types::integer());
-                t.add_column("opt_unique", types::integer().unique(true).nullable(true));
+                t.add_column("opt_unique", types::integer().nullable(true));
+                t.add_index("Post_opt_unique_key", types::index(vec!["opt_unique"]).unique(true));
             });
         })
         .await?;
@@ -132,10 +120,9 @@ async fn a_table_without_fully_required_compound_unique(api: &TestApi) -> TestRe
                 t.add_column("id", types::integer());
                 t.add_column("opt_unique", types::integer().nullable(true));
                 t.add_column("req_unique", types::integer().nullable(false));
-
-                t.add_constraint(
-                    "sqlite_autoindex_Post_1",
-                    types::unique_constraint(vec!["opt_unique", "req_unique"]),
+                t.add_index(
+                    "Post_opt_unique_req_unique_key",
+                    types::index(vec!["opt_unique", "req_unique"]).unique(true),
                 );
             });
         })
@@ -148,7 +135,7 @@ async fn a_table_without_fully_required_compound_unique(api: &TestApi) -> TestRe
           opt_unique Int?
           req_unique Int
 
-          @@unique([opt_unique, req_unique], name: "sqlite_autoindex_Post_1")
+          @@unique([opt_unique, req_unique])
           @@ignore
         }
     "#};
@@ -166,8 +153,11 @@ async fn unsupported_type_keeps_its_usages(api: &TestApi) -> TestResult {
                 t.add_column("id", types::integer().unique(true));
                 t.add_column("dummy", types::integer());
                 t.add_column("broken", types::custom("macaddr"));
-                t.add_index("unique", types::index(vec!["broken", "dummy"]).unique(true));
-                t.add_index("non_unique", types::index(vec!["broken", "dummy"]).unique(false));
+                t.add_index(
+                    "Test_broken_dummy_key",
+                    types::index(vec!["broken", "dummy"]).unique(true),
+                );
+                t.add_index("Test_broken_dummy_idx", types::index(vec!["broken", "dummy"]));
                 t.set_primary_key(&["broken", "dummy"]);
             });
         })
@@ -194,8 +184,8 @@ async fn unsupported_type_keeps_its_usages(api: &TestApi) -> TestResult {
             broken Unsupported("macaddr")
 
             @@id([broken, dummy])
-            @@unique([broken, dummy], name: "unique")
-            @@index([broken, dummy], name: "non_unique")
+            @@unique([broken, dummy])
+            @@index([broken, dummy])
         }
     "#};
 
@@ -295,7 +285,8 @@ async fn remapping_field_names_to_empty(api: &TestApi) -> TestResult {
         .execute(|migration| {
             migration.create_table("User", |t| {
                 t.add_column("1", types::text());
-                t.add_column("last", types::primary());
+                t.add_column("id", types::integer().increments(true).nullable(false));
+                t.add_constraint("User_pkey", types::primary_constraint(&["id"]));
             });
         })
         .await?;
@@ -304,7 +295,7 @@ async fn remapping_field_names_to_empty(api: &TestApi) -> TestResult {
         model User {
           // This field was commented out because of an invalid name. Please provide a valid one that matches [a-zA-Z][a-zA-Z0-9_]*
           // 1 String @map("1")
-          last Int    @id @default(autoincrement())
+          id Int    @id @default(autoincrement())
         }
     "#};
 
@@ -316,21 +307,19 @@ async fn remapping_field_names_to_empty(api: &TestApi) -> TestResult {
 #[test_connector(tags(Postgres), exclude(Cockroach))]
 async fn dbgenerated_in_unsupported(api: &TestApi) -> TestResult {
     api.barrel()
-        .execute_with_schema(
-            |migration| {
-                migration.create_table("Blog", move |t| {
-                    t.add_column("id", types::primary());
-                    t.inject_custom("number Integer Default 1");
-                    t.inject_custom("bigger_number Integer DEFAULT sqrt(4)");
-                    t.inject_custom("point Point DEFAULT Point(0, 0)");
-                });
-            },
-            api.schema_name(),
-        )
+        .execute(|migration| {
+            migration.create_table("Blog", move |t| {
+                t.add_column("id", types::primary());
+                t.inject_custom("number Integer Default 1");
+                t.inject_custom("bigger_number Integer DEFAULT sqrt(4)");
+                t.inject_custom("point Point DEFAULT Point(0, 0)");
+            });
+        })
         .await?;
 
     let dm = indoc! {r##"
         model Blog {
+
           id                Int    @id @default(autoincrement())
           number            Int?   @default(1)
           bigger_number     Int?   @default(dbgenerated("sqrt((4)::double precision)"))
@@ -426,7 +415,11 @@ async fn ignore_on_model_with_only_optional_id(api: &TestApi) -> TestResult {
 
             migration.create_table("OptionalIdAndOptionalUnique", |t| {
                 t.inject_custom("id Text Primary Key");
-                t.add_column("unique", types::integer().unique(true).nullable(true));
+                t.add_column("unique", types::integer().nullable(true));
+                t.add_index(
+                    "OptionalIdAndOptionalUnique_unique_key",
+                    types::index(&["unique"]).unique(true),
+                )
             });
         })
         .await?;

@@ -6,8 +6,9 @@ use crate::introspection_helpers::{
 use crate::version_checker::VersionChecker;
 use crate::Dedup;
 use crate::SqlError;
-use datamodel::{dml, walkers::find_model_by_db_name, Datamodel, Field, Model, RelationField};
-use quaint::connector::SqlFamily;
+use datamodel::common::datamodel_context::DatamodelContext;
+use datamodel::common::ConstraintNames;
+use datamodel::{dml, walkers::find_model_by_db_name, Datamodel, Field, Model, PrimaryKeyDefinition, RelationField};
 use sql_schema_describer::{SqlSchema, Table};
 use tracing::debug;
 
@@ -15,7 +16,7 @@ pub fn introspect(
     schema: &SqlSchema,
     version_check: &mut VersionChecker,
     data_model: &mut Datamodel,
-    sql_family: SqlFamily,
+    ctx: &DatamodelContext,
 ) -> Result<(), SqlError> {
     for table in schema
         .tables
@@ -31,7 +32,7 @@ pub fn introspect(
 
         for column in &table.columns {
             version_check.check_column_for_type_and_default_value(&column);
-            let field = calculate_scalar_field(&table, &column, &sql_family);
+            let field = calculate_scalar_field(&table, &column, &ctx);
             model.add_field(Field::ScalarField(field));
         }
 
@@ -41,21 +42,28 @@ pub fn introspect(
         for foreign_key in &foreign_keys_copy {
             version_check.has_inline_relations(table);
             version_check.uses_on_delete(foreign_key, table);
-            let relation_field = calculate_relation_field(schema, table, foreign_key)?;
+            let relation_field = calculate_relation_field(schema, table, foreign_key, &ctx)?;
             model.add_field(Field::RelationField(relation_field));
         }
 
-        for index in table
-            .indices
-            .iter()
-            .filter(|i| !(i.columns.len() == 1 && i.is_unique()))
-        {
-            model.add_index(calculate_index(index));
+        for index in table.indices.iter() {
+            model.add_index(calculate_index(table.name.clone(), index, &ctx));
         }
 
-        if table.primary_key_columns().len() > 1 {
-            model.id_fields = table.primary_key_columns();
-        }
+        model.primary_key = table.primary_key.as_ref().map(|pk| {
+            let name_in_db_matches_default =
+                ConstraintNames::primary_key_name_matches(pk.constraint_name.clone(), &table.name, &ctx);
+
+            //We do not populate name in client by default. It increases datamodel noise,
+            //and we would need to sanitize it. Users can give their own names if they want
+            //and re-introspection will keep them.
+            PrimaryKeyDefinition {
+                name_in_client: None,
+                name_in_db_matches_default,
+                name_in_db: pk.constraint_name.clone(),
+                fields: pk.columns.clone(),
+            }
+        });
 
         version_check.always_has_created_at_updated_at(table, &model);
         version_check.has_p1_compatible_primary_key_column(table);

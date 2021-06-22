@@ -11,8 +11,10 @@ mod sanitize_datamodel_names;
 mod schema_describer_loading;
 mod version_checker;
 mod warnings;
-
+use datamodel::common::datamodel_context::DatamodelContext;
+use datamodel::common::preview_features::*;
 use datamodel::Datamodel;
+use datamodel_connector::Connector;
 pub use error::*;
 use introspection_connector::{
     ConnectorError, ConnectorResult, DatabaseMetadata, IntrospectionConnector, IntrospectionResult,
@@ -27,10 +29,11 @@ pub type SqlIntrospectionResult<T> = core::result::Result<T, SqlError>;
 #[derive(Debug)]
 pub struct SqlIntrospectionConnector {
     connection: Quaint,
+    preview_features: Vec<PreviewFeature>,
 }
 
 impl SqlIntrospectionConnector {
-    pub async fn new(url: &str) -> ConnectorResult<SqlIntrospectionConnector> {
+    pub async fn new(url: &str, preview_features: Vec<PreviewFeature>) -> ConnectorResult<SqlIntrospectionConnector> {
         let connection = Quaint::new(&url).await.map_err(|error| {
             ConnectionInfo::from_url(url)
                 .map(|connection_info| SqlError::from(error).into_connector_error(&connection_info))
@@ -39,7 +42,10 @@ impl SqlIntrospectionConnector {
 
         tracing::debug!("SqlIntrospectionConnector initialized.");
 
-        Ok(SqlIntrospectionConnector { connection })
+        Ok(SqlIntrospectionConnector {
+            connection,
+            preview_features,
+        })
     }
 
     async fn catch<O>(&self, fut: impl Future<Output = Result<O, SqlError>>) -> ConnectorResult<O> {
@@ -111,12 +117,23 @@ impl IntrospectionConnector for SqlIntrospectionConnector {
         let description = serde_json::to_string(&sql_schema).unwrap();
         Ok(description)
     }
-    async fn introspect(&self, previous_data_model: &Datamodel) -> ConnectorResult<IntrospectionResult> {
+    async fn introspect(
+        &self,
+        previous_data_model: &Datamodel,
+        source_name: String,
+        connector: Box<dyn Connector>,
+    ) -> ConnectorResult<IntrospectionResult> {
         let sql_schema = self.catch(self.describe()).await?;
         tracing::debug!("SQL Schema Describer is done: {:?}", sql_schema);
-        let family = self.connection.connection_info().sql_family();
+        let preview_features = self.preview_features.clone();
 
-        let introspection_result = calculate_datamodel::calculate_datamodel(&sql_schema, &family, &previous_data_model)
+        let ctx = DatamodelContext {
+            source_name: Some(source_name),
+            preview_features,
+            connector,
+        };
+
+        let introspection_result = calculate_datamodel::calculate_datamodel(&sql_schema, &previous_data_model, &ctx)
             .map_err(|sql_introspection_error| {
                 sql_introspection_error.into_connector_error(&self.connection.connection_info())
             })?;

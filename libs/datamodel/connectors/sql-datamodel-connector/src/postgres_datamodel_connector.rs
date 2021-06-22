@@ -57,6 +57,7 @@ impl PostgresDatamodelConnector {
             ConnectorCapability::WritableAutoincField,
             ConnectorCapability::CreateSkipDuplicates,
             ConnectorCapability::UpdateableId,
+            ConnectorCapability::NamedPrimaryKeys,
             ConnectorCapability::JsonFilteringArrayPath,
             ConnectorCapability::CreateManyWriteableAutoIncId,
             ConnectorCapability::AutoIncrement,
@@ -142,6 +143,10 @@ const SCALAR_TYPE_DEFAULTS: &[(ScalarType, PostgresType)] = &[
 impl Connector for PostgresDatamodelConnector {
     fn name(&self) -> &str {
         "Postgres"
+    }
+
+    fn is_empty_default(&self) -> bool {
+        false
     }
 
     fn capabilities(&self) -> &[ConnectorCapability] {
@@ -322,6 +327,10 @@ impl Connector for PostgresDatamodelConnector {
         }
 
         Ok(())
+    }
+
+    fn constraint_name_length(&self) -> usize {
+        63
     }
 }
 

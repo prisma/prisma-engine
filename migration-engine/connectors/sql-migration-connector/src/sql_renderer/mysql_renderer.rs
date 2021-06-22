@@ -87,7 +87,7 @@ impl SqlRenderer for MysqlFlavour {
         unreachable!("render_alter_enum on MySQL")
     }
 
-    fn render_alter_index(&self, indexes: Pair<&IndexWalker<'_>>) -> Vec<String> {
+    fn render_rename_index(&self, indexes: Pair<&IndexWalker<'_>>) -> Vec<String> {
         vec![ddl::AlterTable {
             table_name: indexes.previous().table().name().into(),
             changes: vec![sql_ddl::mysql::AlterTableClause::RenameIndex {
@@ -108,7 +108,8 @@ impl SqlRenderer for MysqlFlavour {
         for change in changes {
             match change {
                 TableChange::DropPrimaryKey => lines.push(sql_ddl::mysql::AlterTableClause::DropPrimaryKey.to_string()),
-                TableChange::AddPrimaryKey { columns } => lines.push(format!(
+                TableChange::RenamePrimaryKey => unreachable!("No Renaming Primary Keys on Mysql"),
+                TableChange::AddPrimaryKey { columns, .. } => lines.push(format!(
                     "ADD PRIMARY KEY ({})",
                     columns.iter().map(|colname| self.quote(colname)).join(", ")
                 )),
@@ -196,11 +197,7 @@ impl SqlRenderer for MysqlFlavour {
             indexes: table
                 .indexes()
                 .map(move |index| ddl::IndexClause {
-                    index_name: if index.name().len() > MYSQL_IDENTIFIER_SIZE_LIMIT {
-                        Some(Cow::Borrowed(&index.name()[0..MYSQL_IDENTIFIER_SIZE_LIMIT]))
-                    } else {
-                        Some(Cow::Borrowed(&index.name()))
-                    },
+                    index_name: Some(Cow::from(index.name())),
                     unique: index.index_type().is_unique(),
                     columns: index.column_names().iter().map(Cow::from).collect(),
                 })

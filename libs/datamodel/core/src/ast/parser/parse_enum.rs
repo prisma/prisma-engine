@@ -32,7 +32,7 @@ pub fn parse_enum(token: &Token<'_>) -> Result<Enum, Diagnostics> {
         }
     }
 
-    errors.to_result()?;
+    errors.make_result()?;
 
     match name {
         Some(name) => Ok(Enum {
