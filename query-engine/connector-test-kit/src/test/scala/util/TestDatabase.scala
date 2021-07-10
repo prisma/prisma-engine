@@ -7,6 +7,11 @@ case class TestDatabase() {
     engine.resetAndSetupDatabase()
   }
 
+  def setupWithStatusCode(project: Project): Int = {
+    val engine = MigrationEngine(project)
+    engine.resetAndSetupDatabase()
+  }
+
   def truncateProjectTables(project: Project): Unit = {
     // FIXME: implement truncation instead of this stupid approach
     setup(project)
@@ -18,7 +23,7 @@ case class MigrationEngine(project: Project) {
   val migrationId = "test_migration_id"
   val logLevel    = "RUST_LOG" -> sys.env.getOrElse("LOG_LEVEL", "debug").toLowerCase
 
-  def resetAndSetupDatabase(): Unit = {
+  def resetAndSetupDatabase(): Int = {
     import scala.sys.process._
     val config = ConnectorConfig.instance
 
